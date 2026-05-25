@@ -1,0 +1,25 @@
+# Core Framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+
+# HTTP & API
+requests==2.32.3
+httpx==0.27.2
+
+# Environment & Configuration
+python-dotenv==1.0.1
+
+# AI/ML
+google-generativeai==0.8.3
+
+# Polymarket (optional - if using live trading)
+py-clob-client-v2==0.1.0
+
+# Production Enhancements
+python-multipart==0.0.12
+aiofiles==24.1.0
+
+# Monitoring & Logging (optional but recommended)
+prometheus-client==0.21.0
+sentry-sdk==2.18.0

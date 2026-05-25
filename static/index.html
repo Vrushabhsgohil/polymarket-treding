@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description"
+        content="PolyBot — AI-powered prediction market trading terminal with automated execution, real-time signals, and portfolio analytics." />
+    <meta name="theme-color" content="#05050a" />
+    <title>PolyBot · Trading Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="/static/style.css?v=2" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+    <!-- ░░░░░░░░░░░░░░░░░ LOGIN ░░░░░░░░░░░░░░░░░ -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-card">
+            <div class="login-logo">
+                <div class="login-logo-mark">
+                    <svg viewBox="0 0 32 32" width="36" height="36" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="16,2 30,28 2,28" />
+                        <line x1="16" y1="12" x2="16" y2="20" />
+                        <line x1="12" y1="22" x2="20" y2="22" />
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="login-title">PolyBot</h1>
+                    <p class="login-subtitle">Trading Terminal</p>
+                </div>
+            </div>
+            <form id="login-form" class="login-form">
+                <div class="field-group">
+                    <label for="login-password" class="field-label">Authentication Token</label>
+                    <input type="password" id="login-password" class="field-input" placeholder="Enter your password…"
+                        required autocomplete="current-password" />
+                </div>
+                <button type="submit" class="btn btn-accent full-w">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                        <polyline points="10 17 15 12 10 7" />
+                        <line x1="15" y1="12" x2="3" y2="12" />
+                    </svg>
+                    Initialize Connection
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- ░░░░░░░░░░░░░░░░░ APP LAYOUT ░░░░░░░░░░░░░░░░░ -->
+    <div class="app-layout">
+
+        <!-- ─── SIDEBAR ─── -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <div class="brand-logo">
+                        <svg viewBox="0 0 32 32" width="24" height="24" fill="none" stroke="currentColor"
+                            stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="16,2 30,28 2,28" />
+                        </svg>
+                    </div>
+                    <span class="brand-text">PolyBot</span>
+                </div>
+            </div>
+
+            <div class="sidebar-engine">
+                <div class="engine-pill">
+                    <span class="engine-dot" id="status-dot"></span>
+                    <span class="engine-label" id="status-text">Engine Offline</span>
+                </div>
+                <button id="toggle-bot-btn" class="btn btn-accent btn-sm full-w">Start Engine</button>
+            </div>
+
+            <nav class="sidebar-nav" aria-label="Main Navigation">
+                <div class="nav-section-title">Terminal</div>
+
+                <a href="#dashboard" class="nav-item active" data-target="dashboard">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                        <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                        <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                        <rect x="14" y="14" width="7" height="7" rx="1.5" />
+                    </svg>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#analytics" class="nav-item" data-target="analytics">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="20" x2="18" y2="10" />
+                        <line x1="12" y1="20" x2="12" y2="4" />
+                        <line x1="6" y1="20" x2="6" y2="14" />
+                    </svg>
+                    <span>Market Signals</span>
+                </a>
+
+                <div class="nav-section-title">Portfolio</div>
+                <a href="#positions" class="nav-item" data-target="positions">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <path d="M12 6v6l4 2" />
+                    </svg>
+                    <span>Positions</span>
+                </a>
+                <a href="#history" class="nav-item" data-target="history">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 3v18h18" />
+                        <path d="m7 14 4-4 3 3 5-7" />
+                    </svg>
+                    <span>Trade History</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <a href="#settings" class="sidebar-action" id="open-settings-btn">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3" />
+                        <path
+                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                    <span>Configuration</span>
+                </a>
+                <a href="#logout" class="sidebar-action text-muted" id="logout-btn">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                        <polyline points="16 17 21 12 16 7"></polyline>
+                        <line x1="21" y1="12" x2="9" y2="12"></line>
+                    </svg>
+                    <span>Terminate Session</span>
+                </a>
+            </div>
+        </aside>
+
+        <!-- ─── MAIN CONTENT ─── -->
+        <div class="main-wrapper">
+
+            <header class="top-header">
+                <!-- Ticker -->
+                <div class="ticker-strip" aria-label="Market ticker">
+                    <div class="ticker-track">
+                        <span class="tick"><b>BTC</b> 104,820.50 <i class="up">+1.24%</i></span>
+                        <span class="tick"><b>ETH</b> 3,180.20 <i class="dn">-0.48%</i></span>
+                        <span class="tick"><b>S&amp;P 500</b> 6,447.31 <i class="up">+0.37%</i></span>
+                        <span class="tick"><b>GOLD</b> 4,520.00 <i class="up">+0.18%</i></span>
+                        <span class="tick"><b>OIL</b> 67.42 <i class="dn">-0.22%</i></span>
+                        <span class="tick"><b>POLY VOL</b> $2.4M <i class="up">+3.8%</i></span>
+                        <span class="tick"><b>SOL</b> 182.40 <i class="up">+2.14%</i></span>
+                        <!-- duplicate for seamless loop -->
+                        <span class="tick"><b>BTC</b> 104,820.50 <i class="up">+1.24%</i></span>
+                        <span class="tick"><b>ETH</b> 3,180.20 <i class="dn">-0.48%</i></span>
+                        <span class="tick"><b>S&amp;P 500</b> 6,447.31 <i class="up">+0.37%</i></span>
+                        <span class="tick"><b>GOLD</b> 4,520.00 <i class="up">+0.18%</i></span>
+                        <span class="tick"><b>OIL</b> 67.42 <i class="dn">-0.22%</i></span>
+                        <span class="tick"><b>POLY VOL</b> $2.4M <i class="up">+3.8%</i></span>
+                        <span class="tick"><b>SOL</b> 182.40 <i class="up">+2.14%</i></span>
+                    </div>
+                </div>
+
+                <!-- Right Header Tools -->
+                <div class="header-tools">
+                    <div class="header-metric">
+                        <span class="metric-label">System Clock</span>
+                        <span class="metric-value mono" id="market-clock">--:--:--</span>
+                    </div>
+                    <div class="header-divider"></div>
+                    <div class="header-metric">
+                        <span class="metric-label">Account Balance</span>
+                        <span class="metric-value accent mono" id="balance-display">$0.00</span>
+                    </div>
+                </div>
+            </header>
+
+            <main class="content-area">
+                <div class="page-header">
+                    <h1 id="page-title">Dashboard</h1>
+                    <div class="live-badge"><span class="live-pip"></span>Live Sync</div>
+                </div>
+
+                <!-- ━━━━━━━━━━ DASHBOARD ━━━━━━━━━━ -->
+                <section id="section-dashboard" class="page-section active">
+
+                    <div class="dashboard-grid">
+
+                        <!-- KPIs -->
+                        <div class="kpi-group">
+                            <div class="kpi-card">
+                                <div class="kpi-icon blue">
+                                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5">
+                                        <path d="M4 19V5" />
+                                        <path d="M4 19h16" />
+                                        <path d="m7 15 4-4 3 3 5-7" />
+                                    </svg>
+                                </div>
+                                <div class="kpi-info">
+                                    <p class="kpi-label">Total Trades</p>
+                                    <p class="kpi-number" id="stat-total-trades">0</p>
+                                </div>
+                            </div>
+                            <div class="kpi-card">
+                                <div class="kpi-icon green">
+                                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5">
+                                        <circle cx="12" cy="12" r="10" />
+                                        <path d="M12 6v6l4 2" />
+                                    </svg>
+                                </div>
+                                <div class="kpi-info">
+                                    <p class="kpi-label">Active Positions</p>
+                                    <p class="kpi-number" id="stat-active-positions">0</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Chart -->
+                        <div class="card chart-card">
+                            <div class="card-header">
+                                <div>
+                                    <span class="card-eyebrow">Performance Tracking</span>
+                                    <h2 class="card-title">Balance & PnL History</h2>
+                                </div>
+                                <button class="btn btn-ghost btn-icon" id="refresh-dashboard" title="Refresh">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor"
+                                        stroke-width="2.5" fill="none">
+                                        <path d="M1 4v6h6" />
+                                        <path d="M3.51 15a9 9 0 1 0 .49-4.93" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="chart-wrap">
+                                <canvas id="balanceChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Recent Executions -->
+                        <div class="card executions-card">
+                            <div class="card-header">
+                                <div>
+                                    <span class="card-eyebrow">Live Order Flow</span>
+                                    <h2 class="card-title">Recent Executions</h2>
+                                </div>
+                                <button class="btn btn-ghost btn-icon" id="refresh-dashboard-table">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor"
+                                        stroke-width="2.5" fill="none">
+                                        <path d="M1 4v6h6" />
+                                        <path d="M3.51 15a9 9 0 1 0 .49-4.93" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="table-wrap">
+                                <table class="tbl">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Market / Token ID</th>
+                                            <th>Action</th>
+                                            <th>Volume</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="recent-activity-body">
+                                        <tr>
+                                            <td colspan="5" class="empty-state">No recent activity detected</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                    </div>
+                </section>
+
+                <!-- ━━━━━━━━━━ HISTORY ━━━━━━━━━━ -->
+                <section id="section-history" class="page-section hidden">
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <span class="card-eyebrow">Complete Records</span>
+                                <h2 class="card-title">Trade History</h2>
+                            </div>
+                            <button class="btn btn-ghost btn-sm" id="refresh-history">
+                                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5"
+                                    fill="none">
+                                    <path d="M1 4v6h6" />
+                                    <path d="M3.51 15a9 9 0 1 0 .49-4.93" />
+                                </svg>
+                                Refresh Logs
+                            </button>
+                        </div>
+                        <div class="table-wrap">
+                            <table class="tbl">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Market Reference</th>
+                                        <th>Side</th>
+                                        <th>Execution Price</th>
+                                        <th>Size</th>
+                                        <th>Status</th>
+                                        <th>Receipt</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="full-history-body">
+                                    <tr>
+                                        <td colspan="7" class="empty-state">No historical data available</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ━━━━━━━━━━ POSITIONS ━━━━━━━━━━ -->
+                <section id="section-positions" class="page-section hidden">
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <span class="card-eyebrow">Portfolio Exposure</span>
+                                <h2 class="card-title">Active Market Positions</h2>
+                            </div>
+                            <button class="btn btn-ghost btn-sm" id="refresh-positions">
+                                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5"
+                                    fill="none">
+                                    <path d="M1 4v6h6" />
+                                    <path d="M3.51 15a9 9 0 1 0 .49-4.93" />
+                                </svg>
+                                Sync Positions
+                            </button>
+                        </div>
+                        <div class="table-wrap">
+                            <table class="tbl">
+                                <thead>
+                                    <tr>
+                                        <th>Asset Identifier</th>
+                                        <th>Contract Size</th>
+                                        <th>Current Value (USD)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positions-body">
+                                    <tr>
+                                        <td colspan="3" class="empty-state">No open positions</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ━━━━━━━━━━ ANALYTICS ━━━━━━━━━━ -->
+                <section id="section-analytics" class="page-section hidden">
+
+                    <div class="kpi-group analytics-kpis mb-xl">
+                        <div class="kpi-card">
+                            <div class="kpi-icon blue">
+                                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"
+                                    stroke-width="2.5">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <line x1="12" y1="16" x2="12" y2="12" />
+                                    <line x1="12" y1="8" x2="12.01" y2="8" />
+                                </svg>
+                            </div>
+                            <div class="kpi-info">
+                                <p class="kpi-label">Markets Scanned</p>
+                                <p class="kpi-number" id="stat-total-analyzed">0</p>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon green">
+                                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"
+                                    stroke-width="2.5">
+                                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                                    <polyline points="22 4 12 14.01 9 11.01" />
+                                </svg>
+                            </div>
+                            <div class="kpi-info">
+                                <p class="kpi-label">High Confidence Signals</p>
+                                <p class="kpi-number" id="stat-active-recs">0</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <span class="card-eyebrow">Real-time Intelligence</span>
+                                <h2 class="card-title">Market Analysis Feed</h2>
+                            </div>
+                            <div class="card-actions">
+                                <button class="btn btn-ghost btn-sm" id="refresh-analytics">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor"
+                                        stroke-width="2.5" fill="none">
+                                        <path d="M1 4v6h6" />
+                                        <path d="M3.51 15a9 9 0 1 0 .49-4.93" />
+                                    </svg>
+                                    Refresh List
+                                </button>
+                                <button class="btn btn-accent btn-sm" id="force-reanalyze-btn">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor"
+                                        stroke-width="2.5" fill="none">
+                                        <circle cx="11" cy="11" r="8" />
+                                        <path d="m21 21-4.35-4.35" />
+                                    </svg>
+                                    Force Scanner
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Filter row -->
+                        <div class="filter-bar">
+                            <div class="search-wrap">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none"
+                                    stroke-width="2" class="search-icon">
+                                    <circle cx="11" cy="11" r="8" />
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                </svg>
+                                <input type="text" id="analytics-search" class="field-input pl-icon"
+                                    placeholder="Search markets…" />
+                            </div>
+                            <div class="select-wrap">
+                                <select id="analytics-filter-side" class="field-input">
+                                    <option value="ALL">All Actions</option>
+                                    <option value="YES">BUY YES Only</option>
+                                    <option value="NO">BUY NO Only</option>
+                                    <option value="HOLD">HOLD Only</option>
+                                </select>
+                            </div>
+                            <div class="select-wrap">
+                                <select id="analytics-sort" class="field-input">
+                                    <option value="date-desc">Newest First</option>
+                                    <option value="confidence-desc">Highest Confidence</option>
+                                    <option value="volume-desc">Highest Volume</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Cards grid -->
+                        <div class="analytics-grid" id="analytics-cards-container">
+                            <div class="empty-state" style="grid-column:1/-1;">
+                                No intelligence data available. Click "Force Scanner" to initialize analysis.
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+            </main>
+        </div>
+    </div>
+
+    <!-- ░░░░░░░░░░░░░░░░░ ANALYSIS DETAIL MODAL ░░░░░░░░░░░░░░░░░ -->
+    <div id="analysis-modal" class="modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-head">
+                <div>
+                    <span class="card-eyebrow" id="modal-market-meta">AI Prediction Intelligence</span>
+                    <h2 class="modal-title" id="modal-market-question">Market Analysis Detail</h2>
+                </div>
+                <button class="modal-x" id="close-modal-btn">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-kpis">
+                    <div class="modal-kpi">
+                        <span>Signal</span>
+                        <div id="modal-rec-badge-container">
+                            <span class="badge rec-badge" id="modal-rec-badge">HOLD</span>
+                        </div>
+                    </div>
+                    <div class="modal-kpi">
+                        <span>Confidence</span>
+                        <strong id="modal-confidence-value">--</strong>
+                    </div>
+                    <div class="modal-kpi">
+                        <span>YES Premium</span>
+                        <strong id="modal-yes-price">--</strong>
+                    </div>
+                    <div class="modal-kpi">
+                        <span>NO Premium</span>
+                        <strong id="modal-no-price">--</strong>
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <h3>Strategic Thesis</h3>
+                    <div class="reasoning-text" id="modal-reasoning-content">Reasoning text goes here…</div>
+                </div>
+
+                <div class="modal-section modal-trade-box">
+                    <h3>Manual Override Control</h3>
+                    <div class="trade-row">
+                        <div class="trade-field">
+                            <label class="field-label">Capital Allocation (USD)</label>
+                            <input type="number" id="manual-trade-amount" class="field-input"
+                                placeholder="e.g. 50.00" />
+                        </div>
+                        <button class="btn btn-green btn-sm" id="manual-trade-yes-btn">Execute YES</button>
+                        <button class="btn btn-red btn-sm" id="manual-trade-no-btn">Execute NO</button>
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <h3>Data Sources</h3>
+                    <ul class="sources-list" id="modal-sources-list">
+                        <li>No sources referenced.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ░░░░░░░░░░░░░░░░░ TRANSACTION INVOICE MODAL ░░░░░░░░░░░░░░░░░ -->
+    <div id="invoice-modal" class="modal-overlay hidden">
+        <div class="modal-box" style="max-width: 480px;">
+            <div class="modal-head" style="border-bottom: none; padding-bottom: 0;">
+                <div>
+                    <span class="card-eyebrow" style="color: var(--text-accent);">Fintech Audit Receipt</span>
+                    <h2 class="modal-title" style="font-size: 18px;">Audit Record</h2>
+                </div>
+                <button class="modal-x" id="close-invoice-modal-btn">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding-top: 0;">
+                <div id="invoice-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ░░░░░░░░░░░░░░░░░ SECTOR SELECTION MODAL ░░░░░░░░░░░░░░░░░ -->
+    <div id="sector-modal" class="modal-overlay hidden">
+        <div class="modal-box modal-wide">
+            <div class="modal-head">
+                <div>
+                    <span class="card-eyebrow">Engine Initialization</span>
+                    <h2 class="modal-title">Define Market Scope</h2>
+                </div>
+                <button class="modal-x" id="close-sector-modal">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted mb-xl">Select the sector and specific subsections the AI should actively monitor
+                    and trade within. Select "All Subsections" for broader coverage.</p>
+                <div class="sector-layout">
+                    <div class="sector-col">
+                        <h3>Available Sectors</h3>
+                        <div id="sector-grid" class="sector-grid">
+                            <div class="empty-state mini">Loading Polymarket sectors…</div>
+                        </div>
+                    </div>
+                    <div class="sector-col">
+                        <h3>Subsections: <span id="selected-sector-label" style="color:var(--text-primary)">--</span>
+                        </h3>
+                        <div id="subsection-grid" class="subsection-grid">
+                            <div class="empty-state mini">Select a sector to view options.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost" id="cancel-sector-btn">Cancel</button>
+                    <button class="btn btn-accent" id="confirm-sector-btn">Ignite Engine</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ░░░░░░░░░░░░░░░░░ SETTINGS MODAL ░░░░░░░░░░░░░░░░░ -->
+    <div id="settings-modal" class="modal-overlay hidden">
+        <div class="modal-box modal-wide">
+            <div class="modal-head">
+                <div>
+                    <span class="card-eyebrow">System Control</span>
+                    <h2 class="modal-title">Terminal Configuration</h2>
+                </div>
+                <button class="modal-x" id="close-settings-btn">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="settings-form" class="settings-grid">
+
+                    <div class="settings-group">
+                        <h4 class="settings-group-title">API & Access</h4>
+                        <div class="field-group">
+                            <label class="field-label">Admin Passcode <span class="field-hint">Leave blank to
+                                    disable</span></label>
+                            <input type="password" id="config-AUTH_PASSWORD" class="field-input"
+                                placeholder="Enter new passcode" />
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <h4 class="settings-group-title">Risk Parameters</h4>
+                        <div class="field-group">
+                            <label class="field-label">Take Profit Yield (%)</label>
+                            <input type="number" id="config-TAKE_PROFIT_PERCENT" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Stop Loss Tolerance (%)</label>
+                            <input type="number" id="config-STOP_LOSS_PERCENT" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Execution Confidence Threshold (0-100)</label>
+                            <input type="number" id="config-MIN_CONFIDENCE" class="field-input" />
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <h4 class="settings-group-title">Capital Sizing</h4>
+                        <div class="field-group">
+                            <label class="field-label">Base Allocation <span class="field-hint">0.02 = 2% of
+                                    equity</span></label>
+                            <input type="number" step="0.01" id="config-BASE_TRADE_SIZE" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Max Allocation <span class="field-hint">0.08 = 8% of
+                                    equity</span></label>
+                            <input type="number" step="0.01" id="config-MAX_TRADE_SIZE" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Minimum Order Size (USD)</label>
+                            <input type="number" id="config-MIN_ORDER_USD" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Concurrent Position Limit</label>
+                            <input type="number" id="config-MAX_POSITIONS" class="field-input" />
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <h4 class="settings-group-title">Engine Limits</h4>
+                        <div class="field-group">
+                            <label class="field-label">Market Discovery Limit</label>
+                            <input type="number" id="config-MARKETS_LIMIT" class="field-input" />
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Analysis Batch Size (Per Tick)</label>
+                            <input type="number" id="config-ANALYSIS_LIMIT_PER_ITERATION" class="field-input" />
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-foot">
+                <button class="btn btn-accent" id="save-settings-btn">Save Configuration</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=2"></script>
+</body>
+
+</html>
