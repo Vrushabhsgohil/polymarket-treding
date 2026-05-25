@@ -19,7 +19,8 @@ from bot_scripts import (
     bot_config,
     update_bot_config,
     execute_paper_trade,
-    get_polymarket_sectors
+    get_polymarket_sectors,
+    reset_simulator
 )
 
 from typing import List, Optional, Any
@@ -58,12 +59,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 bot_active = False
 bot_task = None
-current_bot_run_config = {"sector": None, "subsections": []}
+current_bot_run_config = {"sector": None, "subsections": [], "model": "gemini"}
 
 
 class BotStartRequest(BaseModel):
     sector: Optional[str] = None
     subsections: List[str] = []
+    model: Optional[str] = "gemini"
 
 class ManualTradeRequest(BaseModel):
     question: str
@@ -122,6 +124,7 @@ async def bot_loop():
                 run_bot_iteration,
                 current_bot_run_config.get("sector"),
                 current_bot_run_config.get("subsections", []),
+                current_bot_run_config.get("model", "gemini"),
             )
         except Exception as e:
             print(f"Bot loop error: {e}")
@@ -140,6 +143,7 @@ async def start_bot(payload: BotStartRequest):
     current_bot_run_config = {
         "sector": payload.sector,
         "subsections": payload.subsections or [],
+        "model": payload.model or "gemini",
     }
     bot_active = True
     bot_task = asyncio.create_task(bot_loop())
@@ -161,7 +165,8 @@ async def run_once():
     await asyncio.to_thread(
         run_bot_iteration,
         current_bot_run_config.get("sector"),
-        current_bot_run_config.get("subsections", [])
+        current_bot_run_config.get("subsections", []),
+        current_bot_run_config.get("model", "gemini"),
     )
     return {"status": "ok"}
 
@@ -195,7 +200,8 @@ async def refresh_analyses():
     await asyncio.to_thread(
         run_bot_iteration,
         current_bot_run_config.get("sector"),
-        current_bot_run_config.get("subsections", [])
+        current_bot_run_config.get("subsections", []),
+        current_bot_run_config.get("model", "gemini")
     )
     return {"status": "ok"}
 
@@ -210,6 +216,17 @@ def update_config(payload: dict):
     try:
         update_bot_config(payload)
         return {"status": "ok", "config": bot_config}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/reset")
+def reset_state():
+    if bot_config.get("LIVE_TRADING"):
+        raise HTTPException(status_code=400, detail="Cannot reset simulator in LIVE TRADING mode.")
+    try:
+        reset_simulator()
+        return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

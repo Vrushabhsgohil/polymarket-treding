@@ -30,6 +30,9 @@ bot_config = {
     "MAX_TRADE_SIZE": float(os.getenv("MAX_TRADE_SIZE", "0.08")),
     "TAKE_PROFIT_PERCENT": float(os.getenv("TAKE_PROFIT_PERCENT", "20")),
     "STOP_LOSS_PERCENT": float(os.getenv("STOP_LOSS_PERCENT", "-12")),
+    "PARALLEL_API_KEY": os.getenv("PARALLEL_API_KEY", ""),
+    "PARALLEL_API_BASE": os.getenv("PARALLEL_API_BASE", "https://api.parallel.ai/v1"),
+    "PARALLEL_MODEL": os.getenv("PARALLEL_MODEL", "gpt-4"),
 }
 
 def load_bot_config():
@@ -52,6 +55,9 @@ def load_bot_config():
             "MAX_TRADE_SIZE": float(os.getenv("MAX_TRADE_SIZE", "0.08")),
             "TAKE_PROFIT_PERCENT": float(os.getenv("TAKE_PROFIT_PERCENT", "20")),
             "STOP_LOSS_PERCENT": float(os.getenv("STOP_LOSS_PERCENT", "-12")),
+            "PARALLEL_API_KEY": os.getenv("PARALLEL_API_KEY", ""),
+            "PARALLEL_API_BASE": os.getenv("PARALLEL_API_BASE", "https://api.parallel.ai/v1"),
+            "PARALLEL_MODEL": os.getenv("PARALLEL_MODEL", "gpt-4"),
         })
     except Exception as e:
         print(f"Failed to load environment configuration: {e}")
@@ -129,6 +135,7 @@ trade_history: List[Dict[str, Any]] = []
 
 _analyses_lock = threading.Lock()
 analyses_cache: Dict[str, Dict[str, Any]] = {}
+_trade_lock = threading.Lock()
 
 paper_balance = bot_config["PAPER_STARTING_BALANCE"]
 paper_positions: List[Dict[str, Any]] = []
@@ -185,6 +192,16 @@ def save_state():
 
     except Exception as e:
         print(f"{ts()} - failed to save state: {e}")
+
+
+def reset_simulator():
+    global paper_balance, paper_positions, trade_history
+    with _trade_lock:
+        with _history_lock:
+            paper_balance = float(bot_config.get("PAPER_STARTING_BALANCE", 1000))
+            paper_positions.clear()
+            trade_history.clear()
+    save_state()
 
 
 load_state()
@@ -645,9 +662,141 @@ Return ONLY valid JSON in this exact format:
         return fallback_analysis(snapshot)
 
 
-def analyze_market(market):
+def parallel_analyze_market(snapshot):
+    api_key = bot_config.get("PARALLEL_API_KEY", "")
+    api_base = bot_config.get("PARALLEL_API_BASE", "https://api.parallel.ai/v1")
+
+    if not api_key:
+        print(f"{ts()} - No PARALLEL_API_KEY found, falling back.")
+        return fallback_analysis(snapshot)
+
+    # 1. Search the live web using Parallel AI
+    question = snapshot.get("question", "")
+    if not question:
+        return fallback_analysis(snapshot)
+
+    search_context = ""
+    try:
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "objective": f"Find the latest news, polls, or data regarding this prediction market question: {question}",
+            "search_queries": [question, f"latest news {question}"]
+        }
+        
+        search_resp = requests.post(f"{api_base.rstrip('/')}/search", headers=headers, json=payload, timeout=20)
+        search_resp.raise_for_status()
+        
+        search_data = search_resp.json()
+        results = search_data.get("results", [])
+        
+        excerpts = []
+        for r in results[:3]:
+            if "excerpts" in r and r["excerpts"]:
+                excerpts.extend(r["excerpts"])
+            elif "title" in r:
+                excerpts.append(r["title"])
+        
+        if excerpts:
+            search_context = "LIVE WEB SEARCH RESULTS FROM PARALLEL AI:\n- " + "\n- ".join(excerpts)
+        else:
+            search_context = "No recent web data found."
+            
+    except Exception as e:
+        print(f"{ts()} - Parallel AI Search error: {e}")
+        search_context = f"Parallel AI Search failed: {e}"
+
+    # 2. Feed the context into Gemini for prediction
+    prompt = f"""
+You are a professional prediction-market research agent for Polymarket paper trading.
+
+Analyze this market using the provided structured market data and the LIVE WEB SEARCH RESULTS.
+Do not invent facts. If external facts are missing, reduce confidence.
+
+Your goal:
+1. Estimate the real-world probability of YES using the web search context.
+2. Compare it with market-implied probability.
+3. Recommend BUY YES, BUY NO, or HOLD.
+4. Give dynamic confidence from 0 to 100.
+5. Explain the risk clearly.
+
+Important:
+- This is not financial advice.
+- Prefer HOLD if there is no clear edge.
+- Do not use fixed confidence values.
+- Confidence must depend on price edge, volume, liquidity, category risk, and clarity of market question.
+- trade_size_percent must be 0 for HOLD and between 1 and 8 for trades.
+
+{search_context}
+
+Market snapshot:
+{json.dumps(snapshot, indent=2)}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "side": "YES" | "NO" | "HOLD",
+  "confidence": integer,
+  "ai_probability": number,
+  "edge": number,
+  "risk": "low" | "medium" | "high",
+  "trade_size_percent": number,
+  "summary": "short summary",
+  "analysis_details": [
+    "detail 1",
+    "detail 2",
+    "detail 3"
+  ]
+}}
+"""
+    try:
+        if not gemini_client:
+            print(f"{ts()} - Gemini client is not available for prediction.")
+            return fallback_analysis(snapshot)
+            
+        response = gemini_client.models.generate_content(
+            model=bot_config.get("GEMINI_MODEL", "gemini-1.5-flash"),
+            contents=prompt,
+        )
+        
+        data = extract_json(response.text)
+
+        side = str(data.get("side", "HOLD")).upper()
+        if side not in ["YES", "NO", "HOLD"]:
+            side = "HOLD"
+
+        confidence = int(float(data.get("confidence", 0)))
+        confidence = max(0, min(confidence, 100))
+
+        trade_size_percent = float(data.get("trade_size_percent", 0))
+        trade_size_percent = max(0, min(trade_size_percent, 8))
+
+        if side == "HOLD":
+            trade_size_percent = 0
+
+        return {
+            "side": side,
+            "confidence": confidence,
+            "ai_probability": float(data.get("ai_probability", snapshot["market_yes_probability"])),
+            "edge": float(data.get("edge", 0)),
+            "risk": data.get("risk", "high"),
+            "trade_size_percent": trade_size_percent,
+            "summary": data.get("summary", ""),
+            "analysis_details": data.get("analysis_details", []),
+        }
+
+    except Exception as e:
+        print(f"{ts()} - Parallel AI Analysis error (Gemini generation failed): {e}")
+        return fallback_analysis(snapshot)
+
+
+def analyze_market(market, ai_model="gemini"):
     snapshot = get_market_snapshot(market)
-    ai = gemini_analyze_market(snapshot)
+    if ai_model == "parallel":
+        ai = parallel_analyze_market(snapshot)
+    else:
+        ai = gemini_analyze_market(snapshot)
 
     analysis = {
         "token_id": snapshot["id"],
@@ -707,7 +856,10 @@ def find_markets(sector: Optional[str] = None, subsections: Optional[List[str]] 
 
     print(f"{ts()} - selected {len(filtered)} tradable markets for sector={sector or 'all'} subsections={subsections or []}")
 
-    return filtered[:bot_config["ANALYSIS_LIMIT_PER_ITERATION"]]
+    limit = bot_config.get("ANALYSIS_LIMIT_PER_ITERATION", 5)
+    if limit <= 0:
+        limit = 5
+    return filtered[:limit]
 
 
 def already_have_position(token_id):
@@ -896,8 +1048,14 @@ def update_and_close_positions(markets=None):
     save_state()
 
 
-def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[str]] = None):
-    print(f"{ts()} - scanning markets | sector={sector or 'all'} | subsections={subsections or []}")
+def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[str]] = None, model: str = "gemini"):
+    """
+    Executes a single pass: update positions, scan top markets, analyze using AI model, place paper trades.
+    Uses ThreadPoolExecutor for concurrent market analysis.
+    """
+    global paper_positions
+
+    print(f"{ts()} - scanning markets | sector={sector or 'all'} | subsections={subsections or []} | ai_model={model}")
 
     markets = find_markets(sector=sector, subsections=subsections)
     if not markets:
@@ -907,57 +1065,74 @@ def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[s
     print(f"{ts()} - updating open positions")
     update_and_close_positions(markets)
 
-    print(f"{ts()} - Gemini AI analyzing markets")
+    from concurrent.futures import ThreadPoolExecutor
+    
+    max_to_analyze = bot_config["MAX_POSITIONS"] - len(paper_positions)
+    markets_to_analyze = markets[:max_to_analyze]
+    
+    if not markets_to_analyze:
+        print(f"{ts()} - max positions reached")
+        return
+    
+    def analyze_and_trade(market):
+        try:
+            analysis = analyze_market(market, ai_model=model)
+            if not analysis:
+                return
 
-    for market in markets:
-        if len(paper_positions) >= bot_config["MAX_POSITIONS"]:
-            print(f"{ts()} - max positions reached")
-            break
+            side = analysis["recommended_side"]
+            confidence = analysis["confidence"]
 
-        analysis = analyze_market(market)
+            print("\n------------------------------------------------")
+            print(analysis["question"])
+            print("------------------------------------------------")
+            print(
+                f"{ts()} - side={side} confidence={confidence} "
+                f"market_prob={analysis['market_probability']} "
+                f"ai_prob={analysis['ai_probability']} edge={analysis['edge']}"
+            )
+            print(f"{ts()} - reason: {analysis['reasoning']}")
 
-        side = analysis["recommended_side"]
-        confidence = analysis["confidence"]
+            if side == "HOLD":
+                return
 
-        print("\n------------------------------------------------")
-        print(analysis["question"])
-        print("------------------------------------------------")
-        print(
-            f"{ts()} - side={side} confidence={confidence} "
-            f"market_prob={analysis['market_probability']} "
-            f"ai_prob={analysis['ai_probability']} edge={analysis['edge']}"
-        )
-        print(f"{ts()} - reason: {analysis['reasoning']}")
+            if confidence < bot_config["MIN_CONFIDENCE"]:
+                print(f"{ts()} - confidence below threshold")
+                return
 
-        if side == "HOLD":
-            continue
+            trade_size_percent = float(analysis.get("trade_size_percent", 0))
+            if trade_size_percent <= 0:
+                trade_size_percent = bot_config["BASE_TRADE_SIZE"] * 100
 
-        if confidence < bot_config["MIN_CONFIDENCE"]:
-            print(f"{ts()} - confidence below threshold")
-            continue
+            balance = get_balance()
+            amount = round(balance * (trade_size_percent / 100), 2)
+            amount = max(amount, bot_config["MIN_ORDER_USD"])
 
-        trade_size_percent = float(analysis.get("trade_size_percent", 0))
-        if trade_size_percent <= 0:
-            trade_size_percent = bot_config["BASE_TRADE_SIZE"] * 100
+            price = analysis["yes_price"] if side == "YES" else analysis["no_price"]
 
-        balance = get_balance()
-        amount = round(balance * (trade_size_percent / 100), 2)
+            with _trade_lock:
+                if len(paper_positions) >= bot_config["MAX_POSITIONS"]:
+                    print(f"{ts()} - max positions reached")
+                    return
+                if already_have_position(analysis["token_id"]):
+                    print(f"{ts()} - already have position for {analysis['token_id']}")
+                    return
 
-        amount = max(amount, bot_config["MIN_ORDER_USD"])
+                execute_paper_trade(
+                    question=analysis["question"],
+                    side=side,
+                    amount=amount,
+                    token_id=analysis["token_id"],
+                    price=price,
+                    confidence=confidence,
+                    category=analysis["category"],
+                    analysis=analysis,
+                )
+        except Exception as ex:
+            print(f"Error analyzing market: {ex}")
 
-        price = analysis["yes_price"] if side == "YES" else analysis["no_price"]
-
-        execute_paper_trade(
-            question=analysis["question"],
-            side=side,
-            amount=amount,
-            token_id=analysis["token_id"],
-            price=price,
-            confidence=confidence,
-            category=analysis["category"],
-            analysis=analysis,
-        )
-
-        time.sleep(1)
+    print(f"{ts()} - {model.upper()} AI analyzing markets (Multi-threaded)")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        executor.map(analyze_and_trade, markets_to_analyze)
 
     print(f"\n{ts()} - iteration complete\n")

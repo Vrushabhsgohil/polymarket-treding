@@ -1,4 +1,87 @@
 document.addEventListener('DOMContentLoaded', () => {
+    function showToast(message, type = 'info') {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+
+        let iconSvg = '';
+        if (type === 'success') {
+            iconSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+        } else if (type === 'error') {
+            iconSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+        } else {
+            iconSvg = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
+        }
+
+        toast.innerHTML = `${iconSvg} <span>${message}</span>`;
+        container.appendChild(toast);
+
+        // Trigger animation
+        requestAnimationFrame(() => toast.classList.add('show'));
+
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    function showConfirm({
+        title = 'Are you sure?',
+        message = 'Please confirm this action.',
+        confirmText = 'Confirm',
+        cancelText = 'Cancel',
+        type = 'danger'
+    } = {}) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'custom-confirm-overlay';
+
+            const iconSvg = type === 'danger'
+                ? `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>`
+                : `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>`;
+
+            overlay.innerHTML = `
+        <div class="custom-confirm-box confirm-${type}" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <div class="custom-confirm-icon">${iconSvg}</div>
+          <div class="custom-confirm-content">
+            <h3 id="confirm-title">${escapeHtml(title)}</h3>
+            <p>${escapeHtml(message)}</p>
+          </div>
+          <div class="custom-confirm-actions">
+            <button type="button" class="btn btn-ghost" data-confirm-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="btn ${type === 'danger' ? 'btn-red' : 'btn-accent'}" data-confirm-ok>${escapeHtml(confirmText)}</button>
+          </div>
+        </div>
+      `;
+
+            document.body.appendChild(overlay);
+            requestAnimationFrame(() => overlay.classList.add('show'));
+
+            const close = (value) => {
+                overlay.classList.remove('show');
+                setTimeout(() => {
+                    overlay.remove();
+                    resolve(value);
+                }, 220);
+            };
+
+            overlay.querySelector('[data-confirm-cancel]').addEventListener('click', () => close(false));
+            overlay.querySelector('[data-confirm-ok]').addEventListener('click', () => close(true));
+            overlay.addEventListener('click', (event) => {
+                if (event.target === overlay) close(false);
+            });
+
+            const escHandler = (event) => {
+                if (event.key === 'Escape') {
+                    document.removeEventListener('keydown', escHandler);
+                    close(false);
+                }
+            };
+            document.addEventListener('keydown', escHandler);
+        });
+    }
+
 
     // ── Authentication ───────────────────────────────────────────────────────────
     const originalFetch = window.fetch;
@@ -39,10 +122,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 fetchDashboardData();
                 fetchAnalyses();
             } else {
-                alert('Invalid password');
+                showToast('Invalid password', 'error');
             }
         } catch (err) {
-            alert('Login error');
+            showToast('Login error', 'error');
         }
     });
 
@@ -275,9 +358,11 @@ document.addEventListener('DOMContentLoaded', () => {
         confirmSectorBtn.textContent = 'Starting…';
 
         try {
+            const modelVal = document.getElementById('sector-analysis-model')?.value || 'gemini';
             const payload = {
                 sector: selectedSector,
                 subsections: Array.from(selectedSubsections),
+                model: modelVal,
             };
 
             const res = await fetch('/api/bot/start', {
@@ -287,12 +372,11 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (!res.ok) throw new Error(await res.text());
-            isBotActive = true;
-            updateBotUI();
-            closeSectorSelectionModal();
+            if (res.ok) { isBotActive = true; updateBotUI(); }
+            else showToast('Unable to start bot. Check backend logs.', 'error');
         } catch (e) {
             console.error('Start bot error:', e);
-            alert('Unable to start bot. Check backend logs.');
+            showToast('Unable to start bot. Check backend logs.', 'error');
         } finally {
             toggleBotBtn.disabled = false;
             confirmSectorBtn.disabled = false;
@@ -620,8 +704,8 @@ document.addEventListener('DOMContentLoaded', () => {
     async function submitManualTrade(analysis, side) {
         const amountStr = document.getElementById('manual-trade-amount').value;
         const amount = parseFloat(amountStr);
-        if (!amount || amount <= 0) {
-            alert("Please enter a valid amount.");
+        if (isNaN(amount) || amount <= 0) {
+            showToast("Please enter a valid amount.", "error");
             return;
         }
         const payload = {
@@ -639,15 +723,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify(payload)
             });
             if (res.ok) {
-                alert("Trade executed successfully!");
+                showToast("Trade executed successfully!", "success");
                 fetchDashboardData();
                 modal.classList.add('hidden');
             } else {
                 const error = await res.json();
-                alert("Trade failed: " + (error.detail || "Unknown error"));
+                showToast("Trade failed: " + (error.detail || "Unknown error"), "error");
             }
         } catch (e) {
-            alert("Error submitting trade.");
+            showToast("Error submitting trade.", "error");
         }
     }
 
@@ -897,6 +981,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const input = document.getElementById(`config-${key}`);
                 if (input) input.value = cfg[key];
             }
+            const resetBtn = document.getElementById('reset-simulator-btn');
+            if (resetBtn) {
+                if (cfg['LIVE_TRADING'] === true || String(cfg['LIVE_TRADING']).toLowerCase() === 'true') {
+                    resetBtn.disabled = true;
+                    resetBtn.textContent = 'Disabled in Live Mode';
+                    resetBtn.style.opacity = '0.5';
+                    resetBtn.style.cursor = 'not-allowed';
+                } else {
+                    resetBtn.disabled = false;
+                    resetBtn.textContent = 'Reset Simulator';
+                    resetBtn.style.opacity = '1';
+                    resetBtn.style.cursor = 'pointer';
+                }
+            }
             settingsModal.classList.remove('hidden');
         } catch (e) { console.error('Failed to load settings', e); }
     });
@@ -908,6 +1006,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('close-settings-btn')?.addEventListener('click', () => settingsModal.classList.add('hidden'));
+
+    document.getElementById('reset-simulator-btn')?.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const confirmed = await showConfirm({
+            title: 'Reset Simulator?',
+            message: 'This will wipe your paper balance and all paper positions. This action cannot be undone.',
+            confirmText: 'Yes, Reset',
+            cancelText: 'Cancel',
+            type: 'danger'
+        });
+        if (!confirmed) return;
+        try {
+            const res = await fetch('/api/reset', { method: 'POST' });
+            if (res.ok) {
+                showToast("Simulator reset successfully.", "success");
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                const data = await res.json();
+                showToast(data.detail || "Failed to reset simulator", "error");
+            }
+        } catch (err) {
+            showToast("Error resetting simulator.", "error");
+        }
+    });
+
     document.getElementById('save-settings-btn')?.addEventListener('click', async () => {
         const inputs = document.querySelectorAll('#settings-form input');
         const payload = {};
@@ -925,10 +1048,11 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res.ok) {
                 settingsModal.classList.add('hidden');
+                showToast("Settings saved successfully.", "success");
             } else {
-                alert('Failed to save settings');
+                showToast('Failed to save settings', 'error');
             }
-        } catch (e) { alert('Error saving settings'); }
+        } catch (e) { showToast('Error saving settings', 'error'); }
     });
 
 });

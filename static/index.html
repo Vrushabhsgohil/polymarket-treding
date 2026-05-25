@@ -8,6 +8,8 @@
         content="PolyBot — AI-powered prediction market trading terminal with automated execution, real-time signals, and portfolio analytics." />
     <meta name="theme-color" content="#05050a" />
     <title>PolyBot · Trading Terminal</title>
+    <link rel="icon" type="image/jpeg"
+        href="https://t3.ftcdn.net/jpg/05/34/63/16/360_F_534631653_QGpotSMM3hBC9bUQ1jbfQLhjQHPhdUp0.jpg">
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -571,6 +573,16 @@
                         </div>
                     </div>
                 </div>
+                <div
+                    style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-subtle); display: flex; gap: 16px; align-items: center;">
+                    <div class="field-group" style="flex: 1; max-width: 320px; margin-bottom: 0;">
+                        <label class="field-label">Analysis Execution Model</label>
+                        <select id="sector-analysis-model" class="field-input">
+                            <option value="gemini">Gemini</option>
+                            <option value="parallel">Parallel</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="modal-actions">
                     <button class="btn btn-ghost" id="cancel-sector-btn">Cancel</button>
                     <button class="btn btn-accent" id="confirm-sector-btn">Ignite Engine</button>
@@ -656,6 +668,16 @@
                             <input type="number" id="config-ANALYSIS_LIMIT_PER_ITERATION" class="field-input" />
                         </div>
                     </div>
+
+                    <div class="settings-group" id="reset-simulator-group">
+                        <h4 class="settings-group-title">Data Management</h4>
+                        <div class="field-group">
+                            <label class="field-label">Simulator Reset <span class="field-hint">Wipes paper balance and
+                                    positions (Disabled in Live Trading)</span></label>
+                            <button type="button" class="btn btn-red btn-sm" id="reset-simulator-btn"
+                                style="margin-top: 8px;">Reset Simulator</button>
+                        </div>
+                    </div>
                 </form>
             </div>
             <div class="modal-foot">
@@ -664,6 +686,7 @@
         </div>
     </div>
 
+    <div id="toast-container" class="toast-container"></div>
     <script src="/static/app.js?v=2"></script>
 </body>
 
