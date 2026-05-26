@@ -14,7 +14,7 @@ python-dotenv==1.0.1
 google-generativeai==0.8.3
 
 # Polymarket (optional - if using live trading)
-py-clob-client-v2==0.1.0
+py-clob-client-v2==1.0.1
 
 # Production Enhancements
 python-multipart==0.0.12
