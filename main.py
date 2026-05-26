@@ -2,7 +2,7 @@ import time
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, APIRouter
+from fastapi import FastAPI, Depends, APIRouter, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,7 +20,11 @@ from bot_scripts import (
     update_bot_config,
     execute_paper_trade,
     get_polymarket_sectors,
-    reset_simulator
+    reset_simulator,
+    fetch_queries_for_subsector,
+    analyze_selected_queries,
+    fetch_live_prices,
+    save_bot_config
 )
 
 from typing import List, Optional, Any
@@ -59,13 +63,14 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 bot_active = False
 bot_task = None
-current_bot_run_config = {"sector": None, "subsections": [], "model": "gemini"}
+current_bot_run_config = {"sector": None, "subsections": [], "model": "gemini", "selected_queries": []}
 
 
 class BotStartRequest(BaseModel):
     sector: Optional[str] = None
     subsections: List[str] = []
     model: Optional[str] = "gemini"
+    selected_queries: List[str] = []
 
 class ManualTradeRequest(BaseModel):
     question: str
@@ -116,6 +121,48 @@ def api_sectors():
     return {"sectors": get_polymarket_sectors()}
 
 
+class AnalyzeSelectedRequest(BaseModel):
+    query_ids: List[str]
+    model: str = "gemini"
+
+
+@api_router.get("/queries")
+def api_queries(sector: str, subsector: str):
+    try:
+        queries = fetch_queries_for_subsector(sector, subsector)
+        return {"queries": queries}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/analyze-selected")
+async def api_analyze_selected(payload: AnalyzeSelectedRequest):
+    if not payload.query_ids:
+        raise HTTPException(status_code=400, detail="No query IDs provided")
+    try:
+        results = await asyncio.to_thread(
+            analyze_selected_queries,
+            payload.query_ids,
+            payload.model
+        )
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/ticker")
+def api_ticker():
+    try:
+        return {"prices": fetch_live_prices()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/accept-terms")
+def accept_terms():
+    return {"status": "ok", "message": "Terms and conditions accepted."}
+
+
 async def bot_loop():
     global bot_active
     while bot_active:
@@ -125,6 +172,7 @@ async def bot_loop():
                 current_bot_run_config.get("sector"),
                 current_bot_run_config.get("subsections", []),
                 current_bot_run_config.get("model", "gemini"),
+                current_bot_run_config.get("selected_queries", []),
             )
         except Exception as e:
             print(f"Bot loop error: {e}")
@@ -139,11 +187,14 @@ async def start_bot(payload: BotStartRequest):
 
     if not payload.sector:
         raise HTTPException(status_code=400, detail="Sector is required")
+    if not payload.selected_queries:
+        raise HTTPException(status_code=400, detail="At least one selected query is required to start the bot.")
 
     current_bot_run_config = {
         "sector": payload.sector,
         "subsections": payload.subsections or [],
         "model": payload.model or "gemini",
+        "selected_queries": payload.selected_queries or [],
     }
     bot_active = True
     bot_task = asyncio.create_task(bot_loop())
@@ -167,6 +218,7 @@ async def run_once():
         current_bot_run_config.get("sector"),
         current_bot_run_config.get("subsections", []),
         current_bot_run_config.get("model", "gemini"),
+        current_bot_run_config.get("selected_queries", []),
     )
     return {"status": "ok"}
 
@@ -201,7 +253,8 @@ async def refresh_analyses():
         run_bot_iteration,
         current_bot_run_config.get("sector"),
         current_bot_run_config.get("subsections", []),
-        current_bot_run_config.get("model", "gemini")
+        current_bot_run_config.get("model", "gemini"),
+        current_bot_run_config.get("selected_queries", []),
     )
     return {"status": "ok"}
 
@@ -211,10 +264,16 @@ def get_config():
     return {"config": bot_config}
 
 
+def background_save_config():
+    time.sleep(1.0)
+    save_bot_config()
+
+
 @api_router.post("/config")
-def update_config(payload: dict):
+def update_config(payload: dict, background_tasks: BackgroundTasks):
     try:
-        update_bot_config(payload)
+        update_bot_config(payload, save=False)
+        background_tasks.add_task(background_save_config)
         return {"status": "ok", "config": bot_config}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

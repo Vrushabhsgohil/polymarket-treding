@@ -11,10 +11,10 @@ httpx==0.27.2
 python-dotenv==1.0.1
 
 # AI/ML
-google-genai
+google-generativeai==0.8.3
 
 # Polymarket (optional - if using live trading)
-py-clob-client-v2==1.0.1
+py-clob-client-v2==0.1.0
 
 # Production Enhancements
 python-multipart==0.0.12

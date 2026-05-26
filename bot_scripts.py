@@ -12,7 +12,7 @@ from google import genai
 
 load_dotenv()
 
-_config_lock = threading.Lock()
+_config_lock = threading.RLock()
 
 bot_config = {
     "GAMMA_API": os.getenv("GAMMA_API", "https://gamma-api.polymarket.com"),
@@ -114,11 +114,12 @@ def save_bot_config():
         except Exception as e:
             print(f"Failed to save config to .env: {e}")
 
-def update_bot_config(new_config: dict):
+def update_bot_config(new_config: dict, save: bool = True):
     global bot_config, gemini_client
     with _config_lock:
         bot_config.update(new_config)
-    save_bot_config()
+    if save:
+        save_bot_config()
     if "GEMINI_API_KEY" in new_config:
         try:
             from google import genai
@@ -195,12 +196,14 @@ def save_state():
 
 
 def reset_simulator():
-    global paper_balance, paper_positions, trade_history
+    global paper_balance, paper_positions, trade_history, analyses_cache
     with _trade_lock:
         with _history_lock:
-            paper_balance = float(bot_config.get("PAPER_STARTING_BALANCE", 1000))
-            paper_positions.clear()
-            trade_history.clear()
+            with _analyses_lock:
+                paper_balance = float(bot_config.get("PAPER_STARTING_BALANCE", 1000))
+                paper_positions.clear()
+                trade_history.clear()
+                analyses_cache.clear()
     save_state()
 
 
@@ -246,7 +249,7 @@ def _tag_names(obj: Dict[str, Any]) -> List[str]:
 
 
 def get_polymarket_sectors() -> List[Dict[str, Any]]:
-    """Dynamically fetch sectors and subsections from active Polymarket events."""
+    """Dynamically fetch sectors. Uses the first tag as the main Category, and subsequent tags as Subsectors."""
     try:
         res = requests.get(
             f"{bot_config['GAMMA_API']}/events",
@@ -260,37 +263,59 @@ def get_polymarket_sectors() -> List[Dict[str, Any]]:
         print(f"{ts()} - dynamic sectors fetch failed: {e}")
         events = []
 
-    from collections import Counter
-    tag_counts = Counter()
-    event_tags_map = []
+    from collections import defaultdict, Counter
+    
+    category_counts = Counter()
+    category_tags = defaultdict(Counter)
 
     for event in events:
-        tags = _tag_names(event)
-        for t in tags:
-            if t.lower() != "all":
-                tag_counts[t] += 1
-        event_tags_map.append(tags)
+        # 1. Safely parse the tags array
+        raw_tags = event.get("tags") or []
+        if isinstance(raw_tags, str):
+            raw_tags = safe_json_load(raw_tags, [])
+            
+        parsed_tags = []
+        for tag in raw_tags:
+            tag_name = tag.get("label") if isinstance(tag, dict) else tag
+            if tag_name and str(tag_name).lower() != "all":
+                parsed_tags.append(str(tag_name))
+                
+        # 2. Determine the main category (prefer explicit 'category' field, fallback to the 1st tag)
+        cat = event.get("category")
+        if not cat and parsed_tags:
+            cat = parsed_tags[0] 
+            
+        if not cat or str(cat).lower() == "none":
+            continue
+            
+        category_counts[cat] += 1
 
-    # Pick the top 15 most frequent tags as our "Sectors"
-    top_sectors = [t for t, c in tag_counts.most_common(15)]
-    
+        # 3. Add the remaining tags as subsectors for this category
+        for tag_name in parsed_tags:
+            if tag_name != cat:
+                category_tags[cat][tag_name] += 1
+
     sectors = [{"id": "all", "name": "All Sectors", "subsections": []}]
     
-    for sector_name in top_sectors:
-        sub_counts = Counter()
-        for tags in event_tags_map:
-            if sector_name in tags:
-                for t in tags:
-                    if t != sector_name and t.lower() != "all":
-                        sub_counts[t] += 1
-        
-        # Pick the top 10 co-occurring tags as "Subsections"
-        subsections = [t for t, c in sub_counts.most_common(10)]
+    # Build the final list using the top 15 categories
+    for cat, _ in category_counts.most_common(15):
+        # Grab the top 10 most common sub-tags for this category
+        subsections = [t for t, c in category_tags[cat].most_common(10)]
         sectors.append({
-            "id": _slug(sector_name),
-            "name": sector_name,
+            "id": _slug(cat),
+            "name": cat,
             "subsections": subsections
         })
+        
+    if len(sectors) <= 1:
+        print(f"{ts()} - Warning: API returned no categories, using fallback.")
+        return [
+            {"id": "all", "name": "All Sectors", "subsections": []},
+            {"id": "politics", "name": "Politics", "subsections": ["US Election", "Global Elections", "Trump"]},
+            {"id": "crypto", "name": "Crypto", "subsections": ["Bitcoin", "Ethereum", "Solana", "DeFi"]},
+            {"id": "sports", "name": "Sports", "subsections": ["NFL", "NBA", "Soccer", "Tennis"]},
+            {"id": "pop-culture", "name": "Pop Culture", "subsections": ["Movies", "Music", "Awards"]}
+        ]
         
     return sectors
 
@@ -459,11 +484,49 @@ def get_liquidity(market):
         return 0
 
 
+def get_live_balance():
+    """
+    Fetches the real USDC balance from Polymarket.
+    Requires Polymarket CLOB API integration/signatures.
+    """
+    api_key = bot_config.get("POLY_API_KEY")
+    if not api_key:
+        print(f"{ts()} - Missing Polymarket API Key. Cannot fetch live balance.")
+        return 0.00
+    
+    try:
+        # TODO: Implement actual Polymarket CLOB SDK / API request here.
+        # Example pseudo-code:
+        # client = ClobClient(host, key, secret, passphrase)
+        # return client.get_balance()
+        print(f"{ts()} - [LIVE MODE] Live balance fetch requires CLOB SDK implementation.")
+        return 0.00 # Replace with actual live balance variable
+    except Exception as e:
+        print(f"{ts()} - Error fetching live balance: {e}")
+        return 0.00
+
+
+def get_live_positions():
+    """
+    Fetches actual open positions from Polymarket.
+    """
+    try:
+        # TODO: Implement actual Polymarket CLOB SDK / API request here.
+        return [] # Replace with actual live positions list
+    except Exception as e:
+        print(f"{ts()} - Error fetching live positions: {e}")
+        return []
+
+
 def get_balance():
+    if bot_config.get("LIVE_TRADING"):
+        return get_live_balance()
     return round(paper_balance, 2)
 
 
 def get_positions():
+    if bot_config.get("LIVE_TRADING"):
+        return get_live_positions()
     return paper_positions
 
 
@@ -662,6 +725,90 @@ Return ONLY valid JSON in this exact format:
         return fallback_analysis(snapshot)
 
 
+def process_research_with_gemini(snapshot, research_context, is_deep=False):
+    if not gemini_client:
+        print(f"{ts()} - Gemini client is not available for prediction.")
+        return fallback_analysis(snapshot)
+
+    model_type = "DEEP RESEARCH REPORT" if is_deep else "LIVE WEB SEARCH RESULTS"
+    prompt = f"""
+You are a professional prediction-market research agent for Polymarket paper trading.
+
+Analyze this market using the provided structured market data and the {model_type}.
+Do not invent facts. If external facts are missing, reduce confidence.
+
+Your goal:
+1. Estimate the real-world probability of YES using the research context.
+2. Compare it with market-implied probability.
+3. Recommend BUY YES, BUY NO, or HOLD.
+4. Give dynamic confidence from 0 to 100.
+5. Explain the risk clearly.
+
+Important:
+- This is not financial advice.
+- Prefer HOLD if there is no clear edge.
+- Do not use fixed confidence values.
+- Confidence must depend on price edge, volume, liquidity, category risk, and clarity of market question.
+- trade_size_percent must be 0 for HOLD and between 1 and 8 for trades.
+
+{research_context}
+
+Market snapshot:
+{json.dumps(snapshot, indent=2)}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "side": "YES" | "NO" | "HOLD",
+  "confidence": integer,
+  "ai_probability": number,
+  "edge": number,
+  "risk": "low" | "medium" | "high",
+  "trade_size_percent": number,
+  "summary": "short summary",
+  "analysis_details": [
+    "detail 1",
+    "detail 2",
+    "detail 3"
+  ]
+}}
+"""
+    try:
+        response = gemini_client.models.generate_content(
+            model=bot_config.get("GEMINI_MODEL", "gemini-1.5-flash"),
+            contents=prompt,
+        )
+        
+        data = extract_json(response.text)
+
+        side = str(data.get("side", "HOLD")).upper()
+        if side not in ["YES", "NO", "HOLD"]:
+            side = "HOLD"
+
+        confidence = int(float(data.get("confidence", 0)))
+        confidence = max(0, min(confidence, 100))
+
+        trade_size_percent = float(data.get("trade_size_percent", 0))
+        trade_size_percent = max(0, min(trade_size_percent, 8))
+
+        if side == "HOLD":
+            trade_size_percent = 0
+
+        return {
+            "side": side,
+            "confidence": confidence,
+            "ai_probability": float(data.get("ai_probability", snapshot["market_yes_probability"])),
+            "edge": float(data.get("edge", 0)),
+            "risk": data.get("risk", "high"),
+            "trade_size_percent": trade_size_percent,
+            "summary": data.get("summary", ""),
+            "analysis_details": data.get("analysis_details", []),
+        }
+
+    except Exception as e:
+        print(f"{ts()} - Gemini processing of research context failed: {e}")
+        return fallback_analysis(snapshot)
+
+
 def parallel_analyze_market(snapshot):
     api_key = bot_config.get("PARALLEL_API_KEY", "")
     api_base = bot_config.get("PARALLEL_API_BASE", "https://api.parallel.ai/v1")
@@ -670,7 +817,6 @@ def parallel_analyze_market(snapshot):
         print(f"{ts()} - No PARALLEL_API_KEY found, falling back.")
         return fallback_analysis(snapshot)
 
-    # 1. Search the live web using Parallel AI
     question = snapshot.get("question", "")
     if not question:
         return fallback_analysis(snapshot)
@@ -708,93 +854,63 @@ def parallel_analyze_market(snapshot):
         print(f"{ts()} - Parallel AI Search error: {e}")
         search_context = f"Parallel AI Search failed: {e}"
 
-    # 2. Feed the context into Gemini for prediction
-    prompt = f"""
-You are a professional prediction-market research agent for Polymarket paper trading.
+    return process_research_with_gemini(snapshot, search_context, is_deep=False)
 
-Analyze this market using the provided structured market data and the LIVE WEB SEARCH RESULTS.
-Do not invent facts. If external facts are missing, reduce confidence.
 
-Your goal:
-1. Estimate the real-world probability of YES using the web search context.
-2. Compare it with market-implied probability.
-3. Recommend BUY YES, BUY NO, or HOLD.
-4. Give dynamic confidence from 0 to 100.
-5. Explain the risk clearly.
+def deep_research_analyze(snapshot):
+    api_key = bot_config.get("PARALLEL_API_KEY", "")
+    api_base = bot_config.get("PARALLEL_API_BASE", "https://api.parallel.ai/v1")
 
-Important:
-- This is not financial advice.
-- Prefer HOLD if there is no clear edge.
-- Do not use fixed confidence values.
-- Confidence must depend on price edge, volume, liquidity, category risk, and clarity of market question.
-- trade_size_percent must be 0 for HOLD and between 1 and 8 for trades.
+    if not api_key:
+        print(f"{ts()} - No PARALLEL_API_KEY for Deep Research, using standard search-based parallel flow.")
+        return parallel_analyze_market(snapshot)
 
-{search_context}
-
-Market snapshot:
-{json.dumps(snapshot, indent=2)}
-
-Return ONLY valid JSON in this exact format:
-{{
-  "side": "YES" | "NO" | "HOLD",
-  "confidence": integer,
-  "ai_probability": number,
-  "edge": number,
-  "risk": "low" | "medium" | "high",
-  "trade_size_percent": number,
-  "summary": "short summary",
-  "analysis_details": [
-    "detail 1",
-    "detail 2",
-    "detail 3"
-  ]
-}}
-"""
+    question = snapshot.get("question", "")
     try:
-        if not gemini_client:
-            print(f"{ts()} - Gemini client is not available for prediction.")
-            return fallback_analysis(snapshot)
-            
-        response = gemini_client.models.generate_content(
-            model=bot_config.get("GEMINI_MODEL", "gemini-1.5-flash"),
-            contents=prompt,
-        )
-        
-        data = extract_json(response.text)
-
-        side = str(data.get("side", "HOLD")).upper()
-        if side not in ["YES", "NO", "HOLD"]:
-            side = "HOLD"
-
-        confidence = int(float(data.get("confidence", 0)))
-        confidence = max(0, min(confidence, 100))
-
-        trade_size_percent = float(data.get("trade_size_percent", 0))
-        trade_size_percent = max(0, min(trade_size_percent, 8))
-
-        if side == "HOLD":
-            trade_size_percent = 0
-
-        return {
-            "side": side,
-            "confidence": confidence,
-            "ai_probability": float(data.get("ai_probability", snapshot["market_yes_probability"])),
-            "edge": float(data.get("edge", 0)),
-            "risk": data.get("risk", "high"),
-            "trade_size_percent": trade_size_percent,
-            "summary": data.get("summary", ""),
-            "analysis_details": data.get("analysis_details", []),
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json"
         }
-
+        payload = {
+            "objective": f"Perform deep research on: {question}. Provide a comprehensive analysis, background context, latest news, key arguments for YES/NO outcomes, and any critical risks or dependencies.",
+            "query": question
+        }
+        
+        url = f"{api_base.rstrip('/')}/research"
+        print(f"{ts()} - Initiating Parallel Deep Research for: {question} at {url}")
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if resp.status_code == 404:
+            print(f"{ts()} - /research endpoint returned 404, falling back to search-based parallel flow.")
+            return parallel_analyze_market(snapshot)
+            
+        resp.raise_for_status()
+        research_data = resp.json()
+        
+        research_text = ""
+        if isinstance(research_data, dict):
+            research_text = (
+                research_data.get("result") or 
+                research_data.get("output") or 
+                research_data.get("research") or 
+                research_data.get("summary") or 
+                json.dumps(research_data)
+            )
+        else:
+            research_text = str(research_data)
+            
+        print(f"{ts()} - Parallel Deep Research completed successfully.")
+        return process_research_with_gemini(snapshot, f"PARALLEL AI DEEP RESEARCH REPORT:\n{research_text}", is_deep=True)
+        
     except Exception as e:
-        print(f"{ts()} - Parallel AI Analysis error (Gemini generation failed): {e}")
-        return fallback_analysis(snapshot)
+        print(f"{ts()} - Parallel Deep Research failed: {e}. Falling back to search-based parallel flow.")
+        return parallel_analyze_market(snapshot)
 
 
 def analyze_market(market, ai_model="gemini"):
     snapshot = get_market_snapshot(market)
     if ai_model == "parallel":
-        ai = parallel_analyze_market(snapshot)
+        ai = deep_research_analyze(snapshot)
     else:
         ai = gemini_analyze_market(snapshot)
 
@@ -826,7 +942,25 @@ def analyze_market(market, ai_model="gemini"):
     return analysis
 
 
-def find_markets(sector: Optional[str] = None, subsections: Optional[List[str]] = None):
+def find_markets(sector: Optional[str] = None, subsections: Optional[List[str]] = None, selected_queries: Optional[List[str]] = None):
+    if selected_queries:
+        filtered = []
+        for qid in selected_queries:
+            if not qid:
+                continue
+            try:
+                res = requests.get(f"{bot_config['GAMMA_API']}/markets/{qid}", timeout=10)
+                if res.status_code == 200:
+                    market = res.json()
+                    yes_price, no_price = parse_prices(market)
+                    if yes_price > 0 and no_price > 0:
+                        filtered.append(market)
+                else:
+                    print(f"{ts()} - failed to fetch selected query {qid}: status {res.status_code}")
+            except Exception as e:
+                print(f"{ts()} - error fetching selected query {qid}: {e}")
+        return filtered
+
     markets = get_markets()
 
     filtered = []
@@ -854,7 +988,7 @@ def find_markets(sector: Optional[str] = None, subsections: Optional[List[str]] 
     else:
         filtered = sorted(filtered, key=lambda m: get_volume(m), reverse=True)
 
-    print(f"{ts()} - selected {len(filtered)} tradable markets for sector={sector or 'all'} subsections={subsections or []}")
+    print(f"{ts()} - selected {len(filtered)} tradable markets for sector={sector or 'all'} subsections={subsections or []} selected_queries={selected_queries or []}")
 
     limit = bot_config.get("ANALYSIS_LIMIT_PER_ITERATION", 5)
     if limit <= 0:
@@ -943,6 +1077,51 @@ def execute_paper_trade(question, side, amount, token_id, price, confidence, cat
     return True
 
 
+def evaluate_active_position(pos, market, roi):
+    if not gemini_client:
+        return "HOLD", "No AI available"
+
+    snapshot = get_market_snapshot(market)
+    prompt = f"""
+You are an expert crypto prediction market AI.
+You currently hold an active position in the following market:
+Question: {snapshot['question']}
+Your Position: {pos.get('side')}
+Entry Price: ${pos.get('entry_price', 0):.4f}
+Current Price: ${snapshot['yes_price'] if pos.get('side') == 'YES' else snapshot['no_price']:.4f}
+Current Unrealized ROI: {roi:+.2f}%
+
+Market context:
+Volume: {snapshot['volume']}
+Liquidity: {snapshot['liquidity']}
+
+Based on the live prices and ROI, should we HOLD this position, or SELL (Cash Out) now?
+If you are in significant profit and want to secure it, choose SELL.
+If you are losing heavily and want to cut losses, choose SELL.
+If the position still has potential, choose HOLD.
+
+Return ONLY a valid JSON object in this exact format:
+{{
+  "action": "HOLD" | "SELL",
+  "reason": "short explanation for why"
+}}
+"""
+    try:
+        response = gemini_client.models.generate_content(
+            model=bot_config.get("GEMINI_MODEL", "gemini-1.5-flash"),
+            contents=prompt,
+        )
+        data = extract_json(response.text)
+        action = str(data.get("action", "HOLD")).upper()
+        if action not in ["HOLD", "SELL"]:
+            action = "HOLD"
+        reason = str(data.get("reason", "Take Profit / Stop Loss"))
+        return action, reason
+    except Exception as e:
+        print(f"{ts()} - AI Position Eval Error: {e}")
+        return "HOLD", "Error"
+
+
 def update_and_close_positions(markets=None):
     global paper_balance, paper_positions
 
@@ -1001,10 +1180,11 @@ def update_and_close_positions(markets=None):
             close_reason = None
             if is_closed:
                 close_reason = "Market Resolved"
-            elif roi >= bot_config["TAKE_PROFIT_PERCENT"]:
-                close_reason = "Take Profit"
-            elif roi <= bot_config["STOP_LOSS_PERCENT"]:
-                close_reason = "Stop Loss"
+            else:
+                # Dynamic AI Take-Profit / Stop-Loss evaluation
+                action, reason = evaluate_active_position(pos, market, roi)
+                if action == "SELL":
+                    close_reason = f"AI {reason}"
 
             if close_reason:
                 paper_balance += current_value
@@ -1048,22 +1228,77 @@ def update_and_close_positions(markets=None):
     save_state()
 
 
-def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[str]] = None, model: str = "gemini"):
+def snipe_opportunities(markets):
+    print(f"{ts()} - sniper loop checking for edges in cached analyses...")
+    with _analyses_lock:
+        cached_analyses = list(analyses_cache.values())
+        
+    for analysis in cached_analyses:
+        token_id = analysis.get("token_id")
+        if not token_id:
+            continue
+            
+        # check if we already have an open position for this token
+        with _trade_lock:
+            already_open = any(str(p.get("token_id", "")) == str(token_id) for p in paper_positions)
+        if already_open:
+            continue
+            
+        try:
+            # fetch live price
+            res = requests.get(f"{bot_config['GAMMA_API']}/markets/{token_id}", timeout=5)
+            if res.status_code != 200:
+                continue
+            market = res.json()
+            if market.get("closed", False) or not market.get("active", True):
+                continue
+                
+            yes_price, no_price = parse_prices(market)
+            if yes_price <= 0 or no_price <= 0:
+                continue
+                
+            ai_prob = analysis.get("ai_probability", 0)
+            recommended_side = analysis.get("recommended_side", "HOLD")
+            current_market_prob = yes_price if recommended_side == "YES" else no_price
+            
+            # Recalculate mathematical edge
+            new_edge = ai_prob - current_market_prob
+            min_edge = bot_config["MIN_CONFIDENCE"] / 100.0
+            
+            if new_edge >= min_edge:
+                print(f"{ts()} - SNIPER HIT! {analysis.get('question')[:40]}... | New Edge: {new_edge:.2f}")
+                # Execute Trade
+                execute_paper_trade(
+                    question=analysis.get("question"),
+                    side=recommended_side,
+                    amount=bot_config.get("BASE_TRADE_SIZE", 0.02) * paper_balance,
+                    token_id=token_id,
+                    price=current_market_prob,
+                    confidence=int(new_edge * 100),
+                    category=analysis.get("category"),
+                    analysis=analysis
+                )
+        except Exception as e:
+            print(f"{ts()} - Sniper error on {token_id}: {e}")
+
+def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[str]] = None, model: str = "gemini", selected_queries: Optional[List[str]] = None):
     """
     Executes a single pass: update positions, scan top markets, analyze using AI model, place paper trades.
     Uses ThreadPoolExecutor for concurrent market analysis.
     """
     global paper_positions
 
-    print(f"{ts()} - scanning markets | sector={sector or 'all'} | subsections={subsections or []} | ai_model={model}")
+    print(f"{ts()} - scanning markets | sector={sector or 'all'} | subsections={subsections or []} | selected_queries={selected_queries or []} | ai_model={model}")
 
-    markets = find_markets(sector=sector, subsections=subsections)
+    markets = find_markets(sector=sector, subsections=subsections, selected_queries=selected_queries)
     if not markets:
         print(f"{ts()} - no markets found")
         return
 
     print(f"{ts()} - updating open positions")
     update_and_close_positions(markets)
+    
+    snipe_opportunities(markets)
 
     from concurrent.futures import ThreadPoolExecutor
     
@@ -1136,3 +1371,176 @@ def run_bot_iteration(sector: Optional[str] = None, subsections: Optional[List[s
         executor.map(analyze_and_trade, markets_to_analyze)
 
     print(f"\n{ts()} - iteration complete\n")
+
+
+def fetch_queries_for_subsector(sector: str, subsector: str) -> List[Dict[str, Any]]:
+    """Fetch and return all active queries/markets matching the sector and subsector."""
+    limit = 100
+    offset = 0
+    max_markets = 300
+    all_flat_markets = []
+    
+    while len(all_flat_markets) < max_markets:
+        try:
+            res = requests.get(
+                f"{bot_config['GAMMA_API']}/events",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": limit,
+                    "offset": offset,
+                    "order": "volume_24hr",
+                    "ascending": "false",
+                },
+                timeout=20,
+            )
+            res.raise_for_status()
+            data = res.json()
+            if isinstance(data, dict):
+                events = data.get("events") or data.get("data") or []
+                has_more = data.get("has_more", len(events) == limit)
+            else:
+                events = data
+                has_more = len(events) == limit
+                
+            if not events:
+                break
+                
+            all_flat_markets.extend(_flatten_event_markets(events))
+            offset += len(events)
+            if not has_more:
+                break
+        except Exception as e:
+            print(f"{ts()} - error fetching events for subsector: {e}")
+            break
+            
+    if not all_flat_markets:
+        offset = 0
+        while len(all_flat_markets) < max_markets:
+            try:
+                res = requests.get(
+                    f"{bot_config['GAMMA_API']}/markets",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "limit": limit,
+                        "offset": offset,
+                        "order": "volume24hr",
+                        "ascending": "false"
+                    },
+                    timeout=20,
+                )
+                res.raise_for_status()
+                data = res.json()
+                if not data:
+                    break
+                all_flat_markets.extend(data)
+                offset += len(data)
+            except Exception as e:
+                print(f"{ts()} - error fetching markets fallback: {e}")
+                break
+
+    filtered_snapshots = []
+    subsections = [s.strip() for s in subsector.split(',')] if subsector else []
+    for m in all_flat_markets:
+        if market_matches_selection(m, sector, subsections):
+            yes_price, no_price = parse_prices(m)
+            if yes_price <= 0 or no_price <= 0:
+                continue
+            snapshot = get_market_snapshot(m)
+            filtered_snapshots.append(snapshot)
+            
+    filtered_snapshots.sort(key=lambda x: x.get("volume", 0), reverse=True)
+    return filtered_snapshots
+
+
+def analyze_selected_queries(query_ids: List[str], model: str) -> List[Dict[str, Any]]:
+    """Fetch and run analysis on specific query IDs, returning the list of analyses, and auto-trading if criteria match."""
+    results = []
+    for qid in query_ids:
+        try:
+            res = requests.get(f"{bot_config['GAMMA_API']}/markets/{qid}", timeout=10)
+            if res.status_code == 200:
+                market = res.json()
+                analysis = analyze_market(market, ai_model=model)
+                if analysis:
+                    results.append(analysis)
+                    
+                    # Auto-trading logic
+                    side = analysis.get("recommended_side", "HOLD")
+                    confidence = analysis.get("confidence", 0)
+                    
+                    if side != "HOLD" and confidence >= bot_config.get("MIN_CONFIDENCE", 70):
+                        trade_size_percent = float(analysis.get("trade_size_percent", 0))
+                        if trade_size_percent <= 0:
+                            trade_size_percent = bot_config.get("BASE_TRADE_SIZE", 0.02) * 100
+                            
+                        balance = get_balance()
+                        amount = round(balance * (trade_size_percent / 100), 2)
+                        amount = max(amount, bot_config.get("MIN_ORDER_USD", 10.0))
+                        
+                        price = analysis["yes_price"] if side == "YES" else analysis["no_price"]
+                        
+                        can_trade = True
+                        with _trade_lock:
+                            if len(paper_positions) >= bot_config.get("MAX_POSITIONS", 10):
+                                can_trade = False
+                            if already_have_position(analysis["token_id"]):
+                                can_trade = False
+                                
+                        if can_trade:
+                            execute_paper_trade(
+                                question=analysis["question"],
+                                side=side,
+                                amount=amount,
+                                token_id=analysis["token_id"],
+                                price=price,
+                                confidence=confidence,
+                                category=analysis.get("category", "Manual"),
+                                analysis=analysis
+                            )
+            else:
+                print(f"{ts()} - failed to fetch market {qid} for manual analysis: status {res.status_code}")
+        except Exception as e:
+            print(f"{ts()} - error analyzing selected query {qid}: {e}")
+    return results
+
+
+def fetch_live_prices() -> Dict[str, Any]:
+    """Fetch live crypto prices from CoinGecko API and mock/fallback values for stocks/forex."""
+    prices = {
+        "BTC": {"price": 0.0, "change": 0.0},
+        "ETH": {"price": 0.0, "change": 0.0},
+        "SOL": {"price": 0.0, "change": 0.0},
+        "SPY": {"price": 510.50, "change": 0.25},
+        "GOLD": {"price": 2350.20, "change": -0.12},
+        "EURUSD": {"price": 1.085, "change": 0.05}
+    }
+    
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if "bitcoin" in data:
+                prices["BTC"]["price"] = data["bitcoin"]["usd"]
+                prices["BTC"]["change"] = round(data["bitcoin"].get("usd_24h_change", 0.0), 2)
+            if "ethereum" in data:
+                prices["ETH"]["price"] = data["ethereum"]["usd"]
+                prices["ETH"]["change"] = round(data["ethereum"].get("usd_24h_change", 0.0), 2)
+            if "solana" in data:
+                prices["SOL"]["price"] = data["solana"]["usd"]
+                prices["SOL"]["change"] = round(data["solana"].get("usd_24h_change", 0.0), 2)
+            print(f"{ts()} - Fetched live crypto prices from CoinGecko")
+        else:
+            print(f"{ts()} - CoinGecko API returned status {res.status_code}, using fallback prices")
+            prices["BTC"] = {"price": 67250.00, "change": 1.2}
+            prices["ETH"] = {"price": 3520.00, "change": -0.8}
+            prices["SOL"] = {"price": 165.50, "change": 4.5}
+    except Exception as e:
+        print(f"{ts()} - Error fetching live prices: {e}")
+        prices["BTC"] = {"price": 67250.00, "change": 1.2}
+        prices["ETH"] = {"price": 3520.00, "change": -0.8}
+        prices["SOL"] = {"price": 165.50, "change": 4.5}
+        
+    return prices
