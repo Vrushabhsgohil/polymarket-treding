@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Global State Variables ───────────────────────────────────
     let balanceChart = null;
+    let analysisHistoryChart = null;
     let pollInterval = null;
     let isBotActive = false;
     let confirmResolve = null;
@@ -144,6 +145,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (settingTheme) settingTheme.value = mode;
 
         if (balanceChart) {
+            updateChartTheme();
+        }
+        if (analysisHistoryChart) {
             updateChartTheme();
         }
     }
@@ -738,8 +742,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         marketGrid.innerHTML = filtered.map(q => {
-            const yesPct = q.yes_price ? Math.round(q.yes_price * 100) : '--';
-            const noPct = q.no_price ? Math.round(q.no_price * 100) : '--';
+            const yesPct = q.yes_price ? (q.yes_price * 100).toFixed(1) : '--';
+            const noPct = q.no_price ? (q.no_price * 100).toFixed(1) : '--';
 
             const volNum = Number(q.volume);
             const vol = (!isNaN(volNum) && volNum > 0) ? '$' + Math.round(volNum).toLocaleString() : '--';
@@ -1106,8 +1110,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('modal-conf').textContent = (a.confidence || 0) + '%';
 
         const mkt = fetchedQueries.find(q => q.id === tokenId) || currentDetailMarket;
-        document.getElementById('modal-yes').textContent = a.yes_price ? Math.round(a.yes_price * 100) + '¢' : '--';
-        document.getElementById('modal-no').textContent = a.no_price ? Math.round(a.no_price * 100) + '¢' : '--';
+        document.getElementById('modal-yes').textContent = a.yes_price ? '$' + a.yes_price.toFixed(3) : '--';
+        document.getElementById('modal-no').textContent = a.no_price ? '$' + a.no_price.toFixed(3) : '--';
 
         document.getElementById('modal-reasoning').textContent = a.reasoning || 'No reasoning provided.';
 
@@ -1121,6 +1125,109 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (analysisModal) analysisModal.classList.remove('hidden');
+
+        fetchAndRenderAnalysisHistory(tokenId);
+    }
+
+    async function fetchAndRenderAnalysisHistory(tokenId) {
+        try {
+            const res = await apiFetch('/api/analyses-history/' + tokenId);
+            if (!res.ok) return;
+            const data = await safeJson(res);
+            const history = data.history || [];
+            renderAnalysisHistoryChart(history);
+        } catch (e) {
+            console.error('Failed to fetch analysis history', e);
+        }
+    }
+
+    function renderAnalysisHistoryChart(history) {
+        const ctx = document.getElementById('analysis-history-chart');
+        if (!ctx) return;
+        if (analysisHistoryChart) analysisHistoryChart.destroy();
+
+        if (!history || history.length === 0) return;
+
+        const labels = history.map(h => {
+            const d = new Date(h.timestamp);
+            return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
+        });
+
+        const confData = history.map(h => h.confidence || 0);
+        const yesData = history.map(h => h.yes_price || 0);
+        const noData = history.map(h => h.no_price || 0);
+
+        const textColor = document.documentElement.getAttribute('data-theme') === 'dark' ? '#94a3b8' : '#6b7280';
+        const gridColor = document.documentElement.getAttribute('data-theme') === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+
+        analysisHistoryChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'AI Confidence (%)',
+                        data: confData,
+                        borderColor: '#6366f1',
+                        backgroundColor: 'transparent',
+                        borderWidth: 2,
+                        tension: 0.2,
+                        yAxisID: 'y'
+                    },
+                    {
+                        label: 'YES Price ($)',
+                        data: yesData,
+                        borderColor: '#22c55e',
+                        backgroundColor: 'transparent',
+                        borderWidth: 2,
+                        tension: 0.2,
+                        yAxisID: 'y1'
+                    },
+                    {
+                        label: 'NO Price ($)',
+                        data: noData,
+                        borderColor: '#ef4444',
+                        backgroundColor: 'transparent',
+                        borderWidth: 2,
+                        tension: 0.2,
+                        yAxisID: 'y1'
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: true,
+                        labels: { color: textColor, font: { size: 11 } }
+                    }
+                },
+                scales: {
+                    x: { ticks: { color: textColor }, grid: { display: false } },
+                    y: {
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
+                        min: 0,
+                        max: 100,
+                        ticks: { color: textColor },
+                        grid: { color: gridColor },
+                        title: { display: true, text: 'Confidence (%)', color: textColor }
+                    },
+                    y1: {
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        min: 0,
+                        max: 1,
+                        ticks: { color: textColor },
+                        grid: { drawOnChartArea: false },
+                        title: { display: true, text: 'Price ($)', color: textColor }
+                    }
+                }
+            }
+        });
     }
 
     document.getElementById('close-analysis-modal')?.addEventListener('click', () => {
@@ -1129,11 +1236,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('modal-trade-btn')?.addEventListener('click', async () => {
         if (!currentAnalysis) return;
-        const side = document.getElementById('modal-trade-side')?.value || 'buy';
+        const sideValue = document.getElementById('modal-trade-side')?.value || 'buy_yes';
         const amount = Number(document.getElementById('modal-trade-amount')?.value || 0);
-        showToast(`Executed trade for $${amount} on ${side.toUpperCase()}`, 'success');
-        if (analysisModal) analysisModal.classList.add('hidden');
-        fetchDashboardData();
+
+        if (amount <= 0) {
+            showToast('Please enter a valid amount', 'error');
+            return;
+        }
+
+        let action = 'BUY';
+        let side = 'YES';
+        if (sideValue === 'buy_no') { action = 'BUY'; side = 'NO'; }
+        else if (sideValue === 'sell_yes') { action = 'SELL'; side = 'YES'; }
+        else if (sideValue === 'sell_no') { action = 'SELL'; side = 'NO'; }
+
+        const price = side === 'YES' ? currentAnalysis.yes_price : currentAnalysis.no_price;
+
+        try {
+            const res = await apiFetch('/api/trade', {
+                method: 'POST',
+                body: JSON.stringify({
+                    question: currentAnalysis.question || '',
+                    side: side,
+                    action: action,
+                    amount: amount,
+                    token_id: currentAnalysis.token_id,
+                    price: price || 0.5,
+                    category: currentAnalysis.category || "General"
+                })
+            });
+
+            if (res.ok) {
+                showToast(`Executed ${action} trade for $${amount} on ${side}`, 'success');
+                if (analysisModal) analysisModal.classList.add('hidden');
+                fetchDashboardData();
+            } else {
+                const err = await safeJson(res);
+                showToast(err.detail || 'Trade failed', 'error');
+            }
+        } catch (e) {
+            showToast('Network error executing trade', 'error');
+        }
     });
 
     // ── 13. Settings & Reset ───────────────────────────────────────
@@ -1252,13 +1395,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateChartTheme() {
+        const gridColor = document.documentElement.getAttribute('data-theme') === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+        const textColor = document.documentElement.getAttribute('data-theme') === 'dark' ? '#94a3b8' : '#6b7280';
+
         if (balanceChart) {
-            const gridColor = document.documentElement.getAttribute('data-theme') === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
-            const textColor = document.documentElement.getAttribute('data-theme') === 'dark' ? '#94a3b8' : '#6b7280';
             balanceChart.options.scales.x.ticks.color = textColor;
             balanceChart.options.scales.y.ticks.color = textColor;
             balanceChart.options.scales.y.grid.color = gridColor;
             balanceChart.update();
+        }
+
+        if (analysisHistoryChart) {
+            analysisHistoryChart.options.scales.x.ticks.color = textColor;
+            analysisHistoryChart.options.scales.y.ticks.color = textColor;
+            analysisHistoryChart.options.scales.y.grid.color = gridColor;
+            if (analysisHistoryChart.options.scales.y.title) {
+                analysisHistoryChart.options.scales.y.title.color = textColor;
+            }
+            if (analysisHistoryChart.options.scales.y1) {
+                analysisHistoryChart.options.scales.y1.ticks.color = textColor;
+                if (analysisHistoryChart.options.scales.y1.title) {
+                    analysisHistoryChart.options.scales.y1.title.color = textColor;
+                }
+            }
+            if (analysisHistoryChart.options.plugins.legend) {
+                analysisHistoryChart.options.plugins.legend.labels.color = textColor;
+            }
+            analysisHistoryChart.update();
         }
     }
 

@@ -136,6 +136,8 @@ trade_history: List[Dict[str, Any]] = []
 
 _analyses_lock = threading.Lock()
 analyses_cache: Dict[str, Dict[str, Any]] = {}
+_analyses_history_lock = threading.Lock()
+analyses_history: Dict[str, List[Dict[str, Any]]] = {}
 _trade_lock = threading.Lock()
 
 paper_balance = bot_config["PAPER_STARTING_BALANCE"]
@@ -171,6 +173,17 @@ def load_state():
             trade_history.clear()
             trade_history.extend(data.get("history", []))
 
+        with _analyses_history_lock:
+            analyses_history.clear()
+            for k, v in data.get("analyses_history", {}).items():
+                analyses_history[k] = v
+
+        with _analyses_lock:
+            analyses_cache.clear()
+            for k, v in analyses_history.items():
+                if v and isinstance(v, list):
+                    analyses_cache[k] = v[-1]
+
     except Exception as e:
         print(f"{ts()} - failed to load state: {e}")
 
@@ -180,12 +193,16 @@ def save_state():
         with _history_lock:
             history_copy = list(trade_history)
 
+        with _analyses_history_lock:
+            analyses_history_copy = {k: list(v) for k, v in analyses_history.items()}
+
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "balance": paper_balance,
                     "positions": paper_positions,
                     "history": history_copy,
+                    "analyses_history": analyses_history_copy,
                 },
                 f,
                 indent=2,
@@ -200,10 +217,12 @@ def reset_simulator():
     with _trade_lock:
         with _history_lock:
             with _analyses_lock:
-                paper_balance = float(bot_config.get("PAPER_STARTING_BALANCE", 1000))
-                paper_positions.clear()
-                trade_history.clear()
-                analyses_cache.clear()
+                with _analyses_history_lock:
+                    paper_balance = float(bot_config.get("PAPER_STARTING_BALANCE", 1000))
+                    paper_positions.clear()
+                    trade_history.clear()
+                    analyses_cache.clear()
+                    analyses_history.clear()
     save_state()
 
 
@@ -824,7 +843,7 @@ def parallel_analyze_market(snapshot):
     search_context = ""
     try:
         headers = {
-            "x-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         payload = {
@@ -868,7 +887,7 @@ def deep_research_analyze(snapshot):
     question = snapshot.get("question", "")
     try:
         headers = {
-            "x-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         payload = {
@@ -938,6 +957,11 @@ def analyze_market(market, ai_model="gemini"):
 
     with _analyses_lock:
         analyses_cache[snapshot["id"]] = analysis
+
+    with _analyses_history_lock:
+        if snapshot["id"] not in analyses_history:
+            analyses_history[snapshot["id"]] = []
+        analyses_history[snapshot["id"]].append(analysis)
 
     return analysis
 
@@ -1075,6 +1099,63 @@ def execute_paper_trade(question, side, amount, token_id, price, confidence, cat
     )
 
     return True
+
+
+def manual_close_paper_trade(token_id, side, amount, price, question):
+    global paper_balance, paper_positions
+
+    price = float(price)
+    if price <= 0 or amount <= 0:
+        return False
+
+    with _trade_lock:
+        for pos in paper_positions:
+            if str(pos.get("token_id")) == str(token_id) and pos.get("side") == side:
+                shares_held = float(pos.get("size", 0))
+                cost_basis = float(pos.get("entry_price", 0))
+                
+                shares_to_sell = amount / price
+                if shares_to_sell > shares_held + 1e-6:
+                    shares_to_sell = shares_held
+                    amount = shares_to_sell * price
+                
+                if shares_to_sell <= 1e-6:
+                    return False
+                
+                pnl = (price - cost_basis) * shares_to_sell
+                roi = ((price - cost_basis) / cost_basis) * 100 if cost_basis else 0
+                
+                paper_balance += amount
+                pos["size"] = shares_held - shares_to_sell
+                
+                record = {
+                    "token_id": token_id,
+                    "question": question,
+                    "side": f"SELL {side}",
+                    "amount": round(amount, 2),
+                    "entry_price": round(cost_basis, 4),
+                    "exit_price": round(price, 4),
+                    "price": round(price, 4),
+                    "shares": round(shares_to_sell, 4),
+                    "pnl": round(pnl, 2),
+                    "roi": round(roi, 2),
+                    "balance_after": round(paper_balance, 2),
+                    "status": "Win" if pnl > 0 else "Loss",
+                    "close_reason": "Manual Trade",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                
+                with _history_lock:
+                    trade_history.insert(0, record)
+                
+                if pos["size"] <= 1e-6:
+                    paper_positions.remove(pos)
+                    
+                save_state()
+                print(f"{ts()} - PAPER SELL {side} ${amount:.2f} @ ${price:.4f} | PNL=${pnl:.2f}")
+                return True
+                
+        return False
 
 
 def evaluate_active_position(pos, market, roi):

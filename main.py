@@ -24,7 +24,10 @@ from bot_scripts import (
     fetch_queries_for_subsector,
     analyze_selected_queries,
     fetch_live_prices,
-    save_bot_config
+    save_bot_config,
+    analyses_history,
+    _analyses_history_lock,
+    manual_close_paper_trade
 )
 
 from typing import List, Optional, Any
@@ -75,6 +78,7 @@ class BotStartRequest(BaseModel):
 class ManualTradeRequest(BaseModel):
     question: str
     side: str
+    action: str = "BUY"
     amount: float
     token_id: str
     price: float
@@ -247,6 +251,13 @@ def analyses():
     return {"analyses": data}
 
 
+@api_router.get("/analyses-history/{token_id}")
+def api_analyses_history(token_id: str):
+    with _analyses_history_lock:
+        data = analyses_history.get(token_id, [])
+    return {"history": data}
+
+
 @api_router.post("/analyses/refresh")
 async def refresh_analyses():
     await asyncio.to_thread(
@@ -292,16 +303,26 @@ def reset_state():
 
 @api_router.post("/trade")
 def manual_trade(payload: ManualTradeRequest):
-    success = execute_paper_trade(
-        question=payload.question,
-        side=payload.side,
-        amount=payload.amount,
-        token_id=payload.token_id,
-        price=payload.price,
-        confidence=100,
-        category=payload.category,
-        analysis={"reasoning": "Manual Trade executed by user."}
-    )
+    if payload.action == "SELL":
+        success = manual_close_paper_trade(
+            token_id=payload.token_id,
+            side=payload.side,
+            amount=payload.amount,
+            price=payload.price,
+            question=payload.question
+        )
+    else:
+        success = execute_paper_trade(
+            question=payload.question,
+            side=payload.side,
+            amount=payload.amount,
+            token_id=payload.token_id,
+            price=payload.price,
+            confidence=100,
+            category=payload.category,
+            analysis={"reasoning": "Manual Trade executed by user."}
+        )
+        
     if not success:
         raise HTTPException(status_code=400, detail="Trade rejected (check balance, minimum order size, or existing positions)")
     return {"status": "ok"}

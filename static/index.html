@@ -558,6 +558,13 @@
                         Sources</h3>
                     <ul class="sources-list" id="modal-sources"></ul>
                 </div>
+                <div style="margin-top: 20px;">
+                    <h3 style="font-size: 13px; font-weight: 700; margin-bottom: 8px; color: var(--text-primary);">Trade
+                        History</h3>
+                    <div style="height: 200px; width: 100%;">
+                        <canvas id="analysis-history-chart"></canvas>
+                    </div>
+                </div>
                 <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
                     <h3 style="font-size: 13px; font-weight: 700; margin-bottom: 10px; color: var(--text-primary);">
                         Quick Trade</h3>
@@ -565,8 +572,10 @@
                         <div class="field-group" style="flex: 1; margin-bottom: 0;">
                             <label class="field-label">Side</label>
                             <select class="field-input" id="modal-trade-side">
-                                <option value="buy">Buy YES</option>
-                                <option value="sell">Buy NO</option>
+                                <option value="buy_yes">Buy YES</option>
+                                <option value="buy_no">Buy NO</option>
+                                <option value="sell_yes">Sell YES</option>
+                                <option value="sell_no">Sell NO</option>
                             </select>
                         </div>
                         <div class="field-group" style="flex: 1; margin-bottom: 0;">
