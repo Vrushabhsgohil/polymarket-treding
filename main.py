@@ -157,7 +157,8 @@ async def api_analyze_selected(payload: AnalyzeSelectedRequest):
 @api_router.get("/ticker")
 def api_ticker():
     try:
-        return {"prices": fetch_live_prices()}
+        queries = current_bot_run_config.get("selected_queries", [])
+        return {"prices": fetch_live_prices(queries)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

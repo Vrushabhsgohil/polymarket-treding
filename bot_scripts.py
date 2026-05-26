@@ -928,6 +928,16 @@ def deep_research_analyze(snapshot):
 
 def analyze_market(market, ai_model="gemini"):
     snapshot = get_market_snapshot(market)
+    
+    with _analyses_lock:
+        cached = analyses_cache.get(snapshot["id"])
+
+    # If the prices are the same as last time, just return the cached analysis
+    if cached and "yes_price" in cached and "no_price" in cached:
+        if abs(cached["yes_price"] - snapshot["yes_price"]) < 0.0001 and abs(cached["no_price"] - snapshot["no_price"]) < 0.0001:
+            print(f"{ts()} - Price unchanged for {snapshot['id']}, skipping AI analysis.")
+            return cached
+
     if ai_model == "parallel":
         ai = deep_research_analyze(snapshot)
     else:
@@ -1587,38 +1597,59 @@ def analyze_selected_queries(query_ids: List[str], model: str) -> List[Dict[str,
     return results
 
 
-def fetch_live_prices() -> Dict[str, Any]:
-    """Fetch live crypto prices from CoinGecko API and mock/fallback values for stocks/forex."""
-    prices = {
-        "BTC": {"price": 0.0, "change": 0.0},
-        "ETH": {"price": 0.0, "change": 0.0},
-        "SOL": {"price": 0.0, "change": 0.0},
-        "SPY": {"price": 510.50, "change": 0.25},
-        "GOLD": {"price": 2350.20, "change": -0.12},
-        "EURUSD": {"price": 1.085, "change": 0.05}
-    }
-    
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true"
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if "bitcoin" in data:
-                prices["BTC"]["price"] = data["bitcoin"]["usd"]
-                prices["BTC"]["change"] = round(data["bitcoin"].get("usd_24h_change", 0.0), 2)
-            if "ethereum" in data:
-                prices["ETH"]["price"] = data["ethereum"]["usd"]
-                prices["ETH"]["change"] = round(data["ethereum"].get("usd_24h_change", 0.0), 2)
-            if "solana" in data:
-                prices["SOL"]["price"] = data["solana"]["usd"]
-                prices["SOL"]["change"] = round(data["solana"].get("usd_24h_change", 0.0), 2)
-            print(f"{ts()} - Fetched live crypto prices from CoinGecko")
-        else:
-            print(f"{ts()} - CoinGecko API returned status {res.status_code}, using fallback prices")
+def fetch_live_prices(selected_queries: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Fetch live crypto prices from CoinGecko API and mock/fallback values for stocks/forex, or live polymarket prices for selected queries."""
+    prices = {}
+    if selected_queries:
+        for qid in selected_queries:
+            try:
+                res = requests.get(f"{bot_config['GAMMA_API']}/markets/{qid}", timeout=5)
+                if res.status_code == 200:
+                    market = res.json()
+                    yes_price, no_price = parse_prices(market)
+                    question = market.get("question", qid)
+                    short_q = (question[:25] + '...') if len(question) > 25 else question
+                    
+                    prices[f"{short_q} YES"] = {"price": yes_price, "change": 0.0}
+                    prices[f"{short_q} NO"] = {"price": no_price, "change": 0.0}
+            except Exception:
+                pass
+
+    if not prices:
+        prices = {
+            "BTC": {"price": 0.0, "change": 0.0},
+            "ETH": {"price": 0.0, "change": 0.0},
+            "SOL": {"price": 0.0, "change": 0.0},
+            "SPY": {"price": 510.50, "change": 0.25},
+            "GOLD": {"price": 2350.20, "change": -0.12},
+            "EURUSD": {"price": 1.085, "change": 0.05}
+        }
+        
+        try:
+            url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if "bitcoin" in data:
+                    prices["BTC"]["price"] = data["bitcoin"]["usd"]
+                    prices["BTC"]["change"] = round(data["bitcoin"].get("usd_24h_change", 0.0), 2)
+                if "ethereum" in data:
+                    prices["ETH"]["price"] = data["ethereum"]["usd"]
+                    prices["ETH"]["change"] = round(data["ethereum"].get("usd_24h_change", 0.0), 2)
+                if "solana" in data:
+                    prices["SOL"]["price"] = data["solana"]["usd"]
+                    prices["SOL"]["change"] = round(data["solana"].get("usd_24h_change", 0.0), 2)
+                print(f"{ts()} - Fetched live crypto prices from CoinGecko")
+            else:
+                print(f"{ts()} - CoinGecko API returned status {res.status_code}, using fallback prices")
+                prices["BTC"] = {"price": 67250.00, "change": 1.2}
+                prices["ETH"] = {"price": 3520.00, "change": -0.8}
+                prices["SOL"] = {"price": 165.50, "change": 4.5}
+        except Exception as e:
+            print(f"{ts()} - Error fetching live prices: {e}")
             prices["BTC"] = {"price": 67250.00, "change": 1.2}
             prices["ETH"] = {"price": 3520.00, "change": -0.8}
             prices["SOL"] = {"price": 165.50, "change": 4.5}
-    except Exception as e:
         print(f"{ts()} - Error fetching live prices: {e}")
         prices["BTC"] = {"price": 67250.00, "change": 1.2}
         prices["ETH"] = {"price": 3520.00, "change": -0.8}
