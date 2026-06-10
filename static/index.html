@@ -13,7 +13,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap"
         rel="stylesheet" />
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=8" />
     <script>
         window.onerror = function (msg, url, line, col, error) {
             alert("JS Error: " + msg + " at " + line + ":" + col);
@@ -43,8 +43,13 @@
                 </div>
             </div>
             <div class="field-group">
+                <label class="field-label" for="login-username">Username</label>
+                <input type="text" id="login-username" class="field-input" placeholder="Enter username…"
+                    autocomplete="username" />
+            </div>
+            <div class="field-group" style="margin-top: 12px;">
                 <label class="field-label" for="login-password">Password</label>
-                <input type="password" id="login-password" class="field-input" placeholder="Enter access code…"
+                <input type="password" id="login-password" class="field-input" placeholder="Enter password…"
                     autocomplete="current-password" />
             </div>
             <div class="field-group" style="display: flex; align-items: center; gap: 8px; margin-top: 16px;">
@@ -56,9 +61,14 @@
             <div style="margin-top: 0px; min-height: 20px;">
                 <span id="login-error" class="text-red" style="font-size: 12px;"></span>
             </div>
-            <button class="btn btn-primary btn-full btn-lg" id="login-btn" style="margin-top: 5px;">
-                Authenticate
-            </button>
+            <div style="display: flex; gap: 10px; margin-top: 5px;">
+                <button class="btn btn-primary btn-full btn-lg" id="login-btn">
+                    Login
+                </button>
+                <button class="btn btn-secondary btn-full btn-lg" id="register-btn">
+                    Register
+                </button>
+            </div>
             <div class="login-disclaimer">
                 <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-width="2"
                     style="vertical-align: text-bottom;">
@@ -169,6 +179,15 @@
                     </svg>
                     Trade History
                 </button>
+                <button class="nav-item" data-page="engine">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
+                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
+                        <line x1="6" y1="6" x2="6.01" y2="6" />
+                        <line x1="6" y1="18" x2="6.01" y2="18" />
+                    </svg>
+                    Engine Monitor
+                </button>
 
                 <span class="nav-group-label">System</span>
                 <button class="nav-item" data-page="settings">
@@ -182,6 +201,17 @@
             </nav>
 
             <div class="sidebar-footer">
+                <div class="user-profile-bar"
+                    style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; padding: 4px 8px; background: var(--bg-input); border-radius: 4px; border: 1px solid var(--border);">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                        style="color: var(--accent); flex-shrink: 0;">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                        <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <span
+                        style="font-weight: 600; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;"
+                        id="sidebar-username-display">User: admin</span>
+                </div>
                 <div class="trading-mode-bar">
                     <span class="trading-mode-label">Mode</span>
                     <span class="trading-mode-value" id="trading-mode-display">Paper</span>
@@ -323,7 +353,50 @@
 
                     <div class="tabs">
                         <button class="tab-btn active" id="tab-discover">Discover</button>
+                        <button class="tab-btn" id="tab-recommendation">AI Recommendation</button>
                         <button class="tab-btn" id="tab-analysis">AI Analysis</button>
+                    </div>
+
+                    <div id="tab-content-recommendation" class="hidden">
+                        <div class="card full-width" style="margin-bottom: 20px;">
+                            <div class="card-head">
+                                <div class="card-head-left">
+                                    <span class="card-eyebrow" style="color:var(--accent);">Query Optimization</span>
+                                    <span class="card-title">Market Recommendations</span>
+                                </div>
+                                <div class="card-head-right">
+                                    <button class="btn btn-primary btn-sm" id="generate-ai-recommendations-btn">
+                                        Generate Live AI Recommendations
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="ai-recommendations-status"
+                                style="padding: 10px 20px; font-size: 12px; color: var(--text-muted); display: none;">
+                                Analyzing active markets... this may take up to 10 seconds.
+                            </div>
+                            <div class="card-body"
+                                style="display:grid; grid-template-columns: 1fr 1fr; gap:24px; padding:20px;">
+                                <div>
+                                    <h4
+                                        style="font-size:12px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; letter-spacing: 0.05em;">
+                                        Top Profitable Queries
+                                    </h4>
+                                    <div id="profitable-queries-list"
+                                        style="display:flex; flex-direction:column; gap:8px;">
+                                        <div class="empty-state" style="padding:16px;">Gathering data...</div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h4
+                                        style="font-size:12px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; letter-spacing: 0.05em;">
+                                        Stable / Low-Risk Queries
+                                    </h4>
+                                    <div id="stable-queries-list" style="display:flex; flex-direction:column; gap:8px;">
+                                        <div class="empty-state" style="padding:16px;">Gathering data...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div id="tab-content-discover">
@@ -355,6 +428,8 @@
                                 style="width: 140px; border-color: var(--accent);">
                                 <option value="gemini">Gemini AI</option>
                                 <option value="parallel">Parallel AI</option>
+                                <option value="grok">Grok AI</option>
+                                <option value="siray">Siray AI</option>
                             </select>
 
                             <button class="btn btn-primary btn-sm" id="analyze-selected-btn" disabled>
@@ -388,7 +463,141 @@
 
                 <section id="page-portfolio" class="page-section">
                     <h1 class="page-title">Portfolio</h1>
-                    <p class="page-subtitle">Active positions and holdings</p>
+                    <p class="page-subtitle">Active positions, holdings, and execution statistics</p>
+
+                    <!-- Date Range and Stats Filter Bar -->
+                    <div class="card" style="margin-bottom: 20px;">
+                        <div class="card-body"
+                            style="padding: 16px; display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between;">
+                            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                                <div style="display: flex; flex-direction: column; gap: 4px;">
+                                    <label
+                                        style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Start
+                                        Date</label>
+                                    <input type="date" id="portfolio-start-date" class="field-input"
+                                        style="width: 150px; height: 36px; padding: 6px 10px;" />
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 4px;">
+                                    <label
+                                        style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">End
+                                        Date</label>
+                                    <input type="date" id="portfolio-end-date" class="field-input"
+                                        style="width: 150px; height: 36px; padding: 6px 10px;" />
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 4px;">
+                                    <label
+                                        style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Query
+                                        Filter</label>
+                                    <input type="text" id="portfolio-query-filter" class="field-input"
+                                        placeholder="e.g. Trump, NBA"
+                                        style="width: 150px; height: 36px; padding: 6px 10px;" />
+                                </div>
+                                <div
+                                    style="display: flex; flex-direction: column; gap: 4px; justify-content: flex-end; height: 36px; margin-top: 20px;">
+                                    <button class="btn btn-primary btn-sm" id="portfolio-filter-btn"
+                                        style="height: 36px;">Apply Filter</button>
+                                </div>
+                            </div>
+                            <div
+                                style="display: flex; gap: 8px; align-items: flex-end; height: 36px; margin-top: 20px;">
+                                <button class="btn btn-ghost btn-sm" id="portfolio-quick-7d"
+                                    style="height: 36px;">7D</button>
+                                <button class="btn btn-ghost btn-sm" id="portfolio-quick-30d"
+                                    style="height: 36px;">30D</button>
+                                <button class="btn btn-ghost btn-sm" id="portfolio-quick-all" style="height: 36px;">All
+                                    Time</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Statistics KPI Grid -->
+                    <div class="kpi-grid" style="margin-bottom: 20px;" id="portfolio-stats-grid">
+                        <div class="kpi-card">
+                            <div class="kpi-icon purple">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                                </svg>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-label">Total Investment</div>
+                                <div class="kpi-value" id="port-investment-kpi">$0.00</div>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon green">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                                </svg>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-label">Total Profit</div>
+                                <div class="kpi-value" id="port-profit-kpi" style="color: var(--green);">$0.00</div>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon orange">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                                </svg>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-label">Total Loss</div>
+                                <div class="kpi-value" id="port-loss-kpi" style="color: var(--red);">-$0.00</div>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon blue">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                                    <circle cx="9" cy="7" r="4" />
+                                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                                </svg>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-label">Total Trades</div>
+                                <div class="kpi-value" id="port-trades-kpi">0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Portfolio Charts/Breakdown Section -->
+                    <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; margin-bottom: 20px;"
+                        id="portfolio-charts-container">
+                        <div class="card">
+                            <div class="card-head">
+                                <div class="card-head-left">
+                                    <span class="card-eyebrow">PnL Progression</span>
+                                    <span class="card-title">Cumulative PnL Over Time</span>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="chart-wrap" style="height: 250px;">
+                                    <canvas id="portfolio-pnl-chart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-head">
+                                <div class="card-head-left">
+                                    <span class="card-eyebrow">Allocation</span>
+                                    <span class="card-title">Sector Exposure</span>
+                                </div>
+                            </div>
+                            <div class="card-body"
+                                style="display: flex; align-items: center; justify-content: center; height: 250px; padding: 10px;">
+                                <div
+                                    style="position: relative; width: 100%; height: 100%; max-height: 220px; display: flex; justify-content: center; align-items: center;">
+                                    <canvas id="portfolio-exposure-chart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="card">
                         <div class="card-head">
                             <div class="card-head-left">
@@ -406,15 +615,20 @@
                                         <tr>
                                             <th>Market</th>
                                             <th>Side</th>
-                                            <th style="text-align:right;">Size</th>
+                                            <th>Status</th>
+                                            <th>Auto-Trading</th>
+                                            <th style="text-align:right;">Shares</th>
                                             <th style="text-align:right;">Avg Price</th>
                                             <th style="text-align:right;">Current</th>
                                             <th style="text-align:right;">P&L</th>
+                                            <th style="text-align:right;">ROI</th>
+                                            <th>Mode</th>
+                                            <th style="text-align:center;">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="positions-body">
                                         <tr>
-                                            <td colspan="6" class="empty-state">No active positions.</td>
+                                            <td colspan="11" class="empty-state">No active positions.</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -459,6 +673,92 @@
                     </div>
                 </section>
 
+                <section id="page-engine" class="page-section">
+                    <h1 class="page-title">Auto-Trading Engine Monitor</h1>
+                    <p class="page-subtitle">Real-time trading activities and analysis execution</p>
+
+                    <div class="card full-width" id="bot-process-card"
+                        style="border: 1px solid var(--accent); background: var(--bg-surface); margin-top:20px;">
+                        <div class="card-head">
+                            <div class="card-head-left">
+                                <span class="card-title">Live Engine Monitor</span>
+                            </div>
+                            <span class="badge badge-green pulsing" id="bot-monitor-status">Running</span>
+                        </div>
+                        <div class="card-body"
+                            style="display:grid; grid-template-columns: 1.2fr 1fr; gap:24px; padding:20px;">
+                            <!-- Stepper / Process Steps -->
+                            <div style="display:flex; flex-direction:column; gap:12px;">
+                                <h4
+                                    style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px; letter-spacing: 0.05em;">
+                                    Execution Pipeline</h4>
+
+                                <div class="pipeline-step" id="step-scan">
+                                    <div class="pipeline-bullet">1</div>
+                                    <div class="pipeline-info">
+                                        <div class="pipeline-title">Scan Selected Markets</div>
+                                        <div class="pipeline-desc" id="step-scan-desc">Discovering markets...</div>
+                                    </div>
+                                </div>
+                                <div class="pipeline-step" id="step-positions">
+                                    <div class="pipeline-bullet">2</div>
+                                    <div class="pipeline-info">
+                                        <div class="pipeline-title">Update Position Prices & ROI</div>
+                                        <div class="pipeline-desc" id="step-positions-desc">Retrieving live bid/ask
+                                            books...</div>
+                                    </div>
+                                </div>
+                                <div class="pipeline-step" id="step-risk">
+                                    <div class="pipeline-bullet">3</div>
+                                    <div class="pipeline-info">
+                                        <div class="pipeline-title">AI Analysis & Risk Gate</div>
+                                        <div class="pipeline-desc" id="step-risk-desc">Running risk assessments...</div>
+                                    </div>
+                                </div>
+                                <div class="pipeline-step" id="step-trade">
+                                    <div class="pipeline-bullet">4</div>
+                                    <div class="pipeline-info">
+                                        <div class="pipeline-title">Order Execution</div>
+                                        <div class="pipeline-desc" id="step-trade-desc">Placing trades...</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right side: details and logs -->
+                            <div style="display:flex; flex-direction:column; gap:12px;">
+                                <h4
+                                    style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px; letter-spacing: 0.05em;">
+                                    Engine Status</h4>
+                                <div
+                                    style="background:var(--bg-input); padding:14px; border-radius:6px; border:1px solid var(--border); font-size:12px; display:flex; flex-direction:column; gap:10px;">
+                                    <div style="display:flex; justify-content:space-between; align-items: center;">
+                                        <span class="text-secondary">Current Task:</span>
+                                        <span id="bot-monitor-current-task"
+                                            style="font-weight:700; color:var(--accent); text-align: right;">Initializing...</span>
+                                    </div>
+                                    <div style="display:flex; justify-content:space-between; align-items: center;">
+                                        <span class="text-secondary">Last Iteration:</span>
+                                        <span id="bot-monitor-last-run"
+                                            style="font-family:var(--font-mono); font-weight: 600;">--</span>
+                                    </div>
+                                    <div style="display:flex; justify-content:space-between; align-items: center;">
+                                        <span class="text-secondary">Next Check:</span>
+                                        <span id="bot-monitor-next-run"
+                                            style="font-family:var(--font-mono); font-weight:700; color:var(--green);">--</span>
+                                    </div>
+                                </div>
+
+                                <h4
+                                    style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px; margin-top:8px; letter-spacing: 0.05em;">
+                                    Live Engine Logs</h4>
+                                <div id="bot-monitor-logs"
+                                    style="background:#0b0d13; color:#39ff14; font-family:var(--font-mono); font-size:11px; padding:12px; border-radius:6px; height:160px; overflow-y:auto; border:1px solid var(--border); line-height:1.6; white-space: pre-wrap;">
+                                    [Console] Engine started. Waiting for trading/analysis activities...</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
                 <section id="page-settings" class="page-section">
                     <h1 class="page-title">Settings</h1>
                     <p class="page-subtitle">Configure trading parameters and system options</p>
@@ -473,6 +773,20 @@
                                 </select>
                             </div>
                             <div class="field-group">
+                                <label class="field-label">Liberal Mode (Bypass Risk Checks)</label>
+                                <select class="field-input" id="setting-liberal-mode">
+                                    <option value="false">Disabled (Normal Risk Controls)</option>
+                                    <option value="true">Enabled (Relaxed Constraints)</option>
+                                </select>
+                            </div>
+                            <div class="field-group">
+                                <label class="field-label">Simulate Profit (Paper Drift)</label>
+                                <select class="field-input" id="setting-simulate-profit">
+                                    <option value="false">Disabled (Real Market Prices)</option>
+                                    <option value="true">Enabled (Profitable Price Drift)</option>
+                                </select>
+                            </div>
+                            <div class="field-group">
                                 <label class="field-label">Default Trade Size ($)</label>
                                 <input type="number" class="field-input" id="setting-trade-size" value="50" min="1"
                                     step="1" />
@@ -481,6 +795,26 @@
                                 <label class="field-label">Min. Confidence (%)</label>
                                 <input type="number" class="field-input" id="setting-min-confidence" value="70" min="0"
                                     max="100" step="5" />
+                            </div>
+                            <div class="field-group">
+                                <label class="field-label">Max. Bid/Ask Spread (%)</label>
+                                <input type="number" class="field-input" id="setting-max-spread-limit" value="10"
+                                    min="0" max="100" step="1" />
+                            </div>
+                            <div class="field-group">
+                                <label class="field-label">Min. AI Edge (%)</label>
+                                <input type="number" class="field-input" id="setting-min-edge" value="5" min="0"
+                                    max="100" step="1" />
+                            </div>
+                            <div class="field-group">
+                                <label class="field-label">Min. Liquidity ($)</label>
+                                <input type="number" class="field-input" id="setting-min-liquidity" value="50" min="0"
+                                    step="5" />
+                            </div>
+                            <div class="field-group">
+                                <label class="field-label">Min. Order Book Depth ($)</label>
+                                <input type="number" class="field-input" id="setting-min-depth" value="500" min="0"
+                                    step="10" />
                             </div>
                         </div>
                         <div class="settings-section">
@@ -528,6 +862,14 @@
                     </div>
                 </section>
             </main>
+
+            <footer style="padding: 20px; text-align: center; border-top: 1px solid var(--border); margin-top: 20px;">
+                <div class="ai-disclaimer"
+                    style="font-size: 13px; font-weight: 500; color: var(--text-primary); max-width: 800px; margin: 0 auto; line-height: 1.5;">
+                    ⚠️ <strong>Disclaimer:</strong> AI trading involves high market and technical risks. Past
+                    performance does not guarantee future results. Invest at your own risk.
+                </div>
+            </footer>
         </div>
     </div>
 
@@ -585,6 +927,9 @@
                         </div>
                         <button class="btn btn-green btn-sm" id="modal-trade-btn">Execute Trade</button>
                     </div>
+                    <div id="modal-trade-estimate"
+                        style="margin-top: 10px; font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); font-weight: 500;">
+                    </div>
                 </div>
             </div>
         </div>
@@ -612,24 +957,34 @@
                         <div style="display:flex; gap:16px;">
                             <div style="flex:1;">
                                 <div
-                                    style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-muted); margin-bottom:4px; text-transform:uppercase;">
-                                    <span>Size</span><span>Bid</span>
+                                    style="display:grid; grid-template-columns: 1fr 1fr 1.2fr; font-size:10px; color:var(--text-muted); margin-bottom:4px; text-transform:uppercase;">
+                                    <span>Bid</span>
+                                    <span style="text-align:right;">Shares</span>
+                                    <span style="text-align:right;">Total</span>
                                 </div>
                                 <div id="ob-bids"
                                     style="font-family:var(--font-mono); font-size:12px; line-height:1.8;">
-                                    <div style="display:flex; justify-content:space-between;"><span
-                                            class="text-secondary">--</span><span class="text-green">--</span></div>
+                                    <div style="display:grid; grid-template-columns: 1fr 1fr 1.2fr;">
+                                        <span class="text-green">--</span>
+                                        <span class="text-secondary" style="text-align:right;">--</span>
+                                        <span class="text-secondary" style="text-align:right;">--</span>
+                                    </div>
                                 </div>
                             </div>
                             <div style="flex:1;">
                                 <div
-                                    style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-muted); margin-bottom:4px; text-transform:uppercase;">
-                                    <span>Ask</span><span>Size</span>
+                                    style="display:grid; grid-template-columns: 1fr 1fr 1.2fr; font-size:10px; color:var(--text-muted); margin-bottom:4px; text-transform:uppercase;">
+                                    <span>Ask</span>
+                                    <span style="text-align:right;">Shares</span>
+                                    <span style="text-align:right;">Total</span>
                                 </div>
                                 <div id="ob-asks"
                                     style="font-family:var(--font-mono); font-size:12px; line-height:1.8;">
-                                    <div style="display:flex; justify-content:space-between;"><span
-                                            class="text-red">--</span><span class="text-secondary">--</span></div>
+                                    <div style="display:grid; grid-template-columns: 1fr 1fr 1.2fr;">
+                                        <span class="text-red">--</span>
+                                        <span class="text-secondary" style="text-align:right;">--</span>
+                                        <span class="text-secondary" style="text-align:right;">--</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -716,6 +1071,64 @@
         </div>
     </div>
 
+    <div id="position-log-modal" class="modal-overlay hidden">
+        <div class="modal-box wide">
+            <div class="modal-head">
+                <span class="modal-title" id="pos-log-title">Position Activity Log</span>
+                <button class="modal-close" id="close-pos-log-modal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-kpis" style="grid-template-columns: repeat(4, 1fr); gap:8px; margin-bottom: 16px;">
+                    <div class="modal-kpi">
+                        <span class="modal-kpi-label">Market Status</span>
+                        <span class="modal-kpi-value" id="pos-log-status"
+                            style="font-size:14px; font-weight:700;">--</span>
+                    </div>
+                    <div class="modal-kpi">
+                        <span class="modal-kpi-label">Shares Held</span>
+                        <span class="modal-kpi-value" id="pos-log-shares"
+                            style="font-size:14px; font-family:var(--font-mono);">--</span>
+                    </div>
+                    <div class="modal-kpi">
+                        <span class="modal-kpi-label">Unrealized P&L</span>
+                        <span class="modal-kpi-value" id="pos-log-pnl"
+                            style="font-size:14px; font-family:var(--font-mono);">--</span>
+                    </div>
+                    <div class="modal-kpi">
+                        <span class="modal-kpi-label">Auto-Trading</span>
+                        <span class="modal-kpi-value" id="pos-log-autotrade" style="font-size:14px;">--</span>
+                    </div>
+                </div>
+
+                <div class="table-wrap" style="max-height: 350px; overflow-y: auto;">
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Action</th>
+                                <th>Source</th>
+                                <th style="text-align:right;">Amount</th>
+                                <th style="text-align:right;">Shares</th>
+                                <th style="text-align:right;">Entry</th>
+                                <th style="text-align:right;">Exit/Current</th>
+                                <th style="text-align:right;">P&L / ROI</th>
+                                <th>Confidence</th>
+                                <th>Edge</th>
+                                <th>Risk</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pos-log-body">
+                            <tr>
+                                <td colspan="12" class="empty-state">No events recorded.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="sector-modal" class="modal-overlay hidden">
         <div class="modal-box wide">
             <div class="modal-head">
@@ -760,6 +1173,67 @@
         </div>
     </div>
 
+    <div id="sell-position-modal" class="modal-overlay hidden">
+        <div class="modal-box" style="max-width: 450px;">
+            <div class="modal-head">
+                <span class="modal-title" style="font-size:15px; font-weight:700;">Sell Position</span>
+                <button class="modal-close" id="close-sell-modal">✕</button>
+            </div>
+            <div class="modal-body" style="padding: 20px; display: flex; flex-direction: column; gap: 16px;">
+                <div style="font-size: 13px; font-weight: 600; color: var(--text-primary);" id="sell-modal-question">
+                    Question</div>
+
+                <div style="display: flex; justify-content: space-between; font-size: 12px;">
+                    <span class="text-secondary">Side:</span>
+                    <span id="sell-modal-side" class="badge">YES</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 12px;">
+                    <span class="text-secondary">Shares Held:</span>
+                    <span id="sell-modal-shares" style="font-family: var(--font-mono); font-weight: 600;">0.0000</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 12px;">
+                    <span class="text-secondary">Current Price:</span>
+                    <span id="sell-modal-price" style="font-family: var(--font-mono); font-weight: 600;">$0.00</span>
+                </div>
+                <div
+                    style="display: flex; justify-content: space-between; font-size: 12px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+                    <span class="text-secondary">Total Value:</span>
+                    <span id="sell-modal-value"
+                        style="font-family: var(--font-mono); font-weight: 700; color: var(--green);">$0.00</span>
+                </div>
+
+                <div class="field-group" style="margin-bottom: 0;">
+                    <label class="field-label">Amount to Sell ($)</label>
+                    <input type="number" class="field-input" id="sell-modal-amount" min="0.01" step="0.01" />
+                    <div style="display: flex; justify-content: space-between; margin-top: 4px;">
+                        <span
+                            style="font-size: 10px; color: var(--text-muted); cursor: pointer; text-decoration: underline;"
+                            id="sell-modal-sell-all">Sell Max</span>
+                    </div>
+                </div>
+
+                <div
+                    style="background: var(--bg-surface-hover); padding: 12px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; display: flex; flex-direction: column; gap: 4px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span class="text-secondary">Shares to Sell:</span>
+                        <span id="sell-modal-est-shares"
+                            style="font-family: var(--font-mono); font-weight: 600;">0.0000</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span class="text-secondary">You'll Receive:</span>
+                        <span id="sell-modal-est-receive"
+                            style="font-family: var(--font-mono); font-weight: 700; color: var(--green);">$0.00</span>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button class="btn btn-secondary btn-full" id="cancel-sell-btn">Cancel</button>
+                    <button class="btn btn-red btn-full" id="execute-sell-btn">Confirm Sell</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="confirm-dialog" class="confirm-overlay hidden">
         <div class="confirm-box">
             <div class="confirm-icon info" id="confirm-icon">
@@ -779,7 +1253,7 @@
 
     <div class="toast-container" id="toast-container"></div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=8"></script>
 </body>
 
 </html>

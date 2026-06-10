@@ -6,9 +6,27 @@
 document.addEventListener('DOMContentLoaded', () => {
     'use strict';
 
+    // Intercept browser console errors to log them to UI and backend for diagnostics
+    const originalConsoleError = console.error;
+    console.error = function (...args) {
+        originalConsoleError.apply(console, args);
+        const msg = args.map(arg => {
+            if (arg instanceof Error) return arg.stack || arg.message;
+            if (typeof arg === 'object') {
+                try { return JSON.stringify(arg); } catch { return String(arg); }
+            }
+            return String(arg);
+        }).join(' ');
+        if (msg.includes('/api/logs')) return; // Avoid infinite loops on logging failures
+        addFrontendLog('BROWSER_ERROR', msg, 'error');
+    };
+
     // ── Global State Variables ───────────────────────────────────
     let balanceChart = null;
     let analysisHistoryChart = null;
+    let portfolioPnlChart = null;
+    let portfolioExposureChart = null;
+    let portfolioData = { balance: 0, positions: [], history: [] };
     let pollInterval = null;
     let isBotActive = false;
     let confirmResolve = null;
@@ -21,9 +39,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let analysesCache = [];
     let currentAnalysis = null;
     let currentDetailMarket = null;
+    let currentSellPosition = null;
 
     // Holds the real live order book data for the active modal
     let liveOrderBooks = { yes: [], no: [] };
+    let orderBookPollInterval = null;
 
     // ── 1. Utilities ─────────────────────────────────────────────
     function escapeHtml(str) {
@@ -35,23 +55,145 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function apiFetch(url, opts = {}) {
         const token = sessionStorage.getItem('polybot-token');
+        const method = (opts.method || 'GET').toUpperCase();
+        const originalBody = opts.body;
+
+        // Do not log routine polling endpoints to avoid spamming the backend / logs
+        const silentEndpoints = ['/api/logs', '/api/status', '/api/balance', '/api/positions', '/api/history', '/api/portfolio', '/api/orderbook'];
+        const isSilent = silentEndpoints.some(e => url.includes(e));
+
+        if (!isSilent) {
+            addFrontendLog('API_REQUEST', `${method} ${url}`, 'info', { url, method });
+        }
         const headers = { ...(opts.headers || {}) };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
             headers['Content-Type'] = 'application/json';
             opts.body = JSON.stringify(opts.body);
         }
-        const res = await fetch(url, { ...opts, headers });
-        if (res.status === 401) {
-            sessionStorage.removeItem('polybot-token');
-            showLogin();
-            throw new Error('Unauthorized');
+        try {
+            const res = await fetch(url, { ...opts, headers });
+            if (!isSilent) {
+                addFrontendLog(res.ok ? 'API_RESPONSE' : 'API_ERROR_RESPONSE', `${method} ${url} -> ${res.status}`, res.ok ? 'info' : 'error', {
+                    url,
+                    method,
+                    status: res.status,
+                    request_body: originalBody && !(originalBody instanceof FormData) ? originalBody : undefined
+                });
+            }
+            if (res.status === 401) {
+                sessionStorage.removeItem('polybot-token');
+                showLogin();
+                throw new Error('Unauthorized');
+            }
+            return res;
+        } catch (err) {
+            if (!isSilent) {
+                addFrontendLog('API_FETCH_FAILED', `${method} ${url} failed`, 'error', { url, method, error: err.message });
+            }
+            throw err;
         }
-        return res;
     }
 
     async function safeJson(res) {
         try { return await res.json(); } catch { return {}; }
+    }
+
+    // ── Operation Logs: visible + console logs for every important action ──
+    let frontendOperationLogs = [];
+
+    function ensureOperationLogPanel() {
+        if (document.getElementById('operation-log-panel')) return;
+        const panel = document.createElement('div');
+        panel.id = 'operation-log-panel';
+        panel.className = 'operation-log-panel collapsed';
+        panel.innerHTML = `
+      <button id="operation-log-toggle" class="operation-log-toggle" type="button">System Logs</button>
+      <div class="operation-log-content">
+        <div class="operation-log-head">
+          <strong>Operation Logs</strong>
+          <button id="operation-log-clear" type="button">Clear</button>
+        </div>
+        <div id="operation-log-list" class="operation-log-list"></div>
+      </div>`;
+        document.body.appendChild(panel);
+        document.getElementById('operation-log-toggle')?.addEventListener('click', () => {
+            panel.classList.toggle('collapsed');
+        });
+        document.getElementById('operation-log-clear')?.addEventListener('click', () => {
+            frontendOperationLogs = [];
+            localStorage.removeItem('polybot-operation-logs');
+            renderOperationLogs();
+        });
+        try {
+            const saved = JSON.parse(localStorage.getItem('polybot-operation-logs') || '[]');
+            if (Array.isArray(saved)) frontendOperationLogs = saved.slice(-150);
+        } catch { }
+        renderOperationLogs();
+    }
+
+    function addFrontendLog(action, message, level = 'info', details = {}) {
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level: String(level || 'info').toUpperCase(),
+            source: 'UI',
+            action: String(action || 'UNKNOWN').toUpperCase(),
+            message: String(message || ''),
+            details: details || {}
+        };
+        frontendOperationLogs.unshift(entry);
+        frontendOperationLogs = frontendOperationLogs.slice(0, 150);
+        localStorage.setItem('polybot-operation-logs', JSON.stringify(frontendOperationLogs));
+        // Use raw console.log here to avoid triggering interceptors
+        console.log(`[PolyBot:${entry.level}] ${entry.action} - ${entry.message}`, entry.details);
+        renderOperationLogs();
+
+        // Send the log to backend
+        apiFetch('/api/logs', {
+            method: 'POST',
+            body: {
+                action: entry.action,
+                message: entry.message,
+                level: entry.level,
+                source: 'UI',
+                details: entry.details
+            }
+        }).catch(() => { });
+    }
+
+    function renderOperationLogs(serverLogs = null) {
+        const list = document.getElementById('operation-log-list');
+        if (!list) return;
+        const merged = [
+            ...(serverLogs || []),
+            ...frontendOperationLogs
+        ].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)).slice(0, 80);
+
+        if (!merged.length) {
+            list.innerHTML = '<div class="operation-log-empty">No operation logs yet.</div>';
+            return;
+        }
+
+        list.innerHTML = merged.map(l => `
+      <div class="operation-log-item ${String(l.level || 'info').toLowerCase()}">
+        <div class="operation-log-line">
+          <span class="operation-log-action">${escapeHtml(l.action || 'LOG')}</span>
+          <span class="operation-log-time">${formatTime(l.timestamp)}</span>
+        </div>
+        <div class="operation-log-message">${escapeHtml(l.message || '')}</div>
+        ${l.details && Object.keys(l.details).length ? `<pre>${escapeHtml(JSON.stringify(l.details, null, 2))}</pre>` : ''}
+      </div>`).join('');
+    }
+
+    async function fetchOperationLogs() {
+        try {
+            const res = await apiFetch('/api/logs?limit=100');
+            if (!res.ok) return;
+            const data = await safeJson(res);
+            renderOperationLogs(data.logs || []);
+        } catch (e) {
+            console.warn('Failed to fetch operation logs', e);
+        }
     }
 
     function formatUsd(v) {
@@ -161,11 +303,14 @@ document.addEventListener('DOMContentLoaded', () => {
     settingTheme?.addEventListener('change', (e) => applyTheme(e.target.value));
 
     applyTheme(localStorage.getItem('polybot-theme') || 'light');
+    ensureOperationLogPanel();
 
     // ── 5. Auth / Login ──────────────────────────────────────────
     const loginOverlay = document.getElementById('login-overlay');
     const appContainer = document.getElementById('app-container');
     const loginBtn = document.getElementById('login-btn');
+    const registerBtn = document.getElementById('register-btn');
+    const loginUsername = document.getElementById('login-username');
     const loginPassword = document.getElementById('login-password');
     const loginError = document.getElementById('login-error');
     const logoutBtn = document.getElementById('logout-btn');
@@ -174,10 +319,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const viewTermsLink = document.getElementById('view-terms-link');
 
     if (loginBtn) loginBtn.disabled = true;
+    if (registerBtn) registerBtn.disabled = true;
 
     termsCheckbox?.addEventListener('change', (e) => {
         if (loginBtn) loginBtn.disabled = !e.target.checked;
+        if (registerBtn) registerBtn.disabled = !e.target.checked;
     });
+
+    if (localStorage.getItem('polybot-terms-accepted') === 'true') {
+        if (termsCheckbox) {
+            termsCheckbox.checked = true;
+            if (loginBtn) loginBtn.disabled = false;
+            if (registerBtn) registerBtn.disabled = false;
+        }
+    }
 
     viewTermsLink?.addEventListener('click', (e) => {
         e.preventDefault();
@@ -199,11 +354,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function doLogin() {
+        const un = loginUsername?.value || '';
         const pw = loginPassword?.value || '';
         if (loginError) loginError.textContent = '';
 
         if (!termsCheckbox?.checked) {
             if (loginError) loginError.textContent = 'You must accept the terms to continue.';
+            return;
+        }
+
+        if (!un || !pw) {
+            if (loginError) loginError.textContent = 'Username and password are required.';
             return;
         }
 
@@ -216,12 +377,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: pw })
+                body: JSON.stringify({ username: un, password: pw })
             });
 
             if (!res.ok) {
                 const data = await safeJson(res);
-                throw new Error(data.detail || 'Invalid password');
+                throw new Error(data.detail || 'Invalid username or password');
             }
 
             const data = await safeJson(res);
@@ -233,12 +394,61 @@ document.addEventListener('DOMContentLoaded', () => {
             if (loginError) loginError.textContent = e.message;
             if (loginBtn) loginBtn.disabled = false;
         } finally {
-            if (loginBtn) loginBtn.textContent = 'Authenticate';
+            if (loginBtn) loginBtn.textContent = 'Login';
+        }
+    }
+
+    async function doRegister() {
+        const un = loginUsername?.value || '';
+        const pw = loginPassword?.value || '';
+        if (loginError) loginError.textContent = '';
+
+        if (!termsCheckbox?.checked) {
+            if (loginError) loginError.textContent = 'You must accept the terms to continue.';
+            return;
+        }
+
+        if (!un || !pw) {
+            if (loginError) loginError.textContent = 'Username and password are required.';
+            return;
+        }
+
+        if (registerBtn) {
+            registerBtn.disabled = true;
+            registerBtn.textContent = 'Registering…';
+        }
+
+        try {
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: un, password: pw })
+            });
+
+            if (!res.ok) {
+                const data = await safeJson(res);
+                throw new Error(data.detail || 'Registration failed');
+            }
+
+            showToast('Registration successful! Logging in...', 'success');
+            sessionStorage.setItem('polybot-token', `${un}:${pw}`);
+            localStorage.setItem('polybot-terms-accepted', 'true');
+            showApp();
+
+        } catch (e) {
+            if (loginError) loginError.textContent = e.message;
+        } finally {
+            if (registerBtn) {
+                registerBtn.disabled = false;
+                registerBtn.textContent = 'Register';
+            }
         }
     }
 
     loginBtn?.addEventListener('click', doLogin);
+    registerBtn?.addEventListener('click', doRegister);
     loginPassword?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && termsCheckbox?.checked) doLogin(); });
+    loginUsername?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && termsCheckbox?.checked) doLogin(); });
 
     document.getElementById('accept-terms-btn')?.addEventListener('click', () => {
         if (termsModal) termsModal.classList.add('hidden');
@@ -300,25 +510,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── 7. Market Tabs ───────────────────────────────────────────
     const tabDiscover = document.getElementById('tab-discover');
+    const tabRecommendation = document.getElementById('tab-recommendation');
     const tabAnalysis = document.getElementById('tab-analysis');
     const contentDiscover = document.getElementById('tab-content-discover');
+    const contentRecommendation = document.getElementById('tab-content-recommendation');
     const contentAnalysis = document.getElementById('tab-content-analysis');
 
     function switchMarketTab(tab) {
+        [tabDiscover, tabRecommendation, tabAnalysis].forEach(t => t?.classList.remove('active'));
+        [contentDiscover, contentRecommendation, contentAnalysis].forEach(c => c?.classList.add('hidden'));
+
         if (tab === 'discover') {
             tabDiscover?.classList.add('active');
-            tabAnalysis?.classList.remove('active');
             contentDiscover?.classList.remove('hidden');
-            contentAnalysis?.classList.add('hidden');
+        } else if (tab === 'recommendation') {
+            tabRecommendation?.classList.add('active');
+            contentRecommendation?.classList.remove('hidden');
         } else {
             tabAnalysis?.classList.add('active');
-            tabDiscover?.classList.remove('active');
             contentAnalysis?.classList.remove('hidden');
-            contentDiscover?.classList.add('hidden');
         }
     }
 
     tabDiscover?.addEventListener('click', () => switchMarketTab('discover'));
+    tabRecommendation?.addEventListener('click', () => switchMarketTab('recommendation'));
     tabAnalysis?.addEventListener('click', () => switchMarketTab('analysis'));
 
     // ── 8. Bot Control ───────────────────────────────────────────
@@ -332,17 +547,18 @@ document.addEventListener('DOMContentLoaded', () => {
             if (res.ok) {
                 const data = await safeJson(res);
                 isBotActive = data.active;
-                if (isBotActive && data.config?.selected_queries) {
-                    data.config.selected_queries.forEach(q => selectedQueries.add(q));
+                if (data.config?.selected_queries) {
+                    data.config.selected_queries.forEach(q => selectedQueries.add(String(q)));
                 }
-                updateBotUI();
+                updateBotUI(data);
             }
         } catch (e) {
             console.error('Failed to fetch status', e);
         }
     }
 
-    function updateBotUI() {
+    function updateBotUI(data = null) {
+        const processCard = document.getElementById('bot-process-card');
         if (isBotActive) {
             if (engineDot) engineDot.classList.add('active');
             if (engineLabel) engineLabel.textContent = 'Engine Running';
@@ -352,6 +568,14 @@ document.addEventListener('DOMContentLoaded', () => {
           Stop Engine`;
                 toggleBotBtn.classList.remove('btn-primary');
                 toggleBotBtn.classList.add('btn-red');
+            }
+
+            // Show monitor card
+            if (processCard) processCard.classList.remove('hidden');
+
+            // Start polling status if not already polling
+            if (!pollInterval) {
+                pollInterval = setInterval(fetchStatus, 3000);
             }
         } else {
             if (engineDot) engineDot.classList.remove('active');
@@ -363,13 +587,109 @@ document.addEventListener('DOMContentLoaded', () => {
                 toggleBotBtn.classList.add('btn-primary');
                 toggleBotBtn.classList.remove('btn-red');
             }
+
+            // Hide monitor card
+            if (processCard) processCard.classList.add('hidden');
+
+            // Stop polling status
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+
+        // If data is provided, update the monitor fields
+        if (data && data.process_state) {
+            const state = data.process_state;
+            const statusBadge = document.getElementById('bot-monitor-status');
+            const currentTask = document.getElementById('bot-monitor-current-task');
+            const lastRun = document.getElementById('bot-monitor-last-run');
+            const nextRun = document.getElementById('bot-monitor-next-run');
+            const logsConsole = document.getElementById('bot-monitor-logs');
+
+            if (statusBadge) {
+                statusBadge.textContent = state.status;
+                statusBadge.className = 'badge ' + (state.status.toLowerCase() === 'running' ? 'badge-green pulsing' : 'badge-secondary');
+            }
+
+            if (currentTask) {
+                currentTask.textContent = state.current_action || 'Idle';
+            }
+
+            if (lastRun) {
+                lastRun.textContent = state.last_run ? formatTime(state.last_run) : '--:--:--';
+            }
+
+            if (nextRun) {
+                nextRun.textContent = state.next_run ? formatTime(state.next_run) : '--:--:--';
+            }
+
+            // Highlight pipeline steps based on the current step/action
+            const stepScan = document.getElementById('step-scan');
+            const stepPositions = document.getElementById('step-positions');
+            const stepRisk = document.getElementById('step-risk');
+            const stepTrade = document.getElementById('step-trade');
+
+            const action = (state.current_action || '').toLowerCase();
+
+            // Reset classes
+            [stepScan, stepPositions, stepRisk, stepTrade].forEach(step => {
+                if (step) step.className = 'pipeline-step';
+            });
+
+            if (state.status.toLowerCase() === 'running') {
+                if (action.includes('scan')) {
+                    if (stepScan) stepScan.classList.add('active');
+                } else if (action.includes('position') || action.includes('bid/ask')) {
+                    if (stepScan) stepScan.classList.add('completed');
+                    if (stepPositions) stepPositions.classList.add('active');
+                } else if (action.includes('risk') || action.includes('analyzing')) {
+                    if (stepScan) stepScan.classList.add('completed');
+                    if (stepPositions) stepPositions.classList.add('completed');
+                    if (stepRisk) stepRisk.classList.add('active');
+                } else if (action.includes('trade') || action.includes('order')) {
+                    if (stepScan) stepScan.classList.add('completed');
+                    if (stepPositions) stepPositions.classList.add('completed');
+                    if (stepRisk) stepRisk.classList.add('completed');
+                    if (stepTrade) stepTrade.classList.add('active');
+                }
+            } else if (state.status.toLowerCase() === 'sleeping') {
+                [stepScan, stepPositions, stepRisk, stepTrade].forEach(step => {
+                    if (step) step.classList.add('completed');
+                });
+            }
+
+            if (logsConsole && data.logs) {
+                const allowedActions = ['TRADE', 'ANALYSIS', 'POSITION', 'BOT_SCAN', 'LIVE_ORDER'];
+                const filteredLogs = data.logs.filter(l => {
+                    const actionText = l.action || '';
+                    return allowedActions.some(allowed => actionText.includes(allowed));
+                });
+
+                logsConsole.innerHTML = filteredLogs.slice(0, 15).map(l => {
+                    const actionText = l.action || 'LOG';
+                    const messageText = l.message || '';
+                    const timeText = formatTime(l.timestamp);
+                    return `[${timeText}] [${actionText}] ${messageText}`;
+                }).join('\n');
+                if (!filteredLogs.length) {
+                    logsConsole.innerHTML = '[Console] Waiting for trading or analysis activities...';
+                }
+                logsConsole.scrollTop = logsConsole.scrollHeight;
+            }
+
+            // Trigger updates of dashboard and positions
+            if (state.status.toLowerCase() === 'running') {
+                fetchDashboardData();
+                fetchPositions();
+            }
         }
     }
 
     toggleBotBtn?.addEventListener('click', async () => {
         if (!isBotActive) {
             if (selectedQueries.size === 0) {
-                showToast("Select at least one market in the Discover tab to start the continuous engine.", "info");
+                showToast("Select at least one market in the Discover or AI Analysis tab to start the continuous engine.", "info");
                 navigateTo('markets');
                 if (!selectedSector) openSectorModal();
                 return;
@@ -613,12 +933,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectAllCb = document.getElementById('select-all-markets');
 
     selectAllCb?.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            fetchedQueries.forEach(q => selectedQueries.add(q.id));
+        const isChecked = e.target.checked;
+        if (isChecked) {
+            fetchedQueries.forEach(q => selectedQueries.add(String(q.id)));
         } else {
             selectedQueries.clear();
         }
-        renderMarketCards();
+        marketGrid.querySelectorAll('.market-cb').forEach(cb => {
+            cb.checked = isChecked;
+        });
+        updateAnalyzeBtn();
     });
 
     function renderSectorBar() {
@@ -695,7 +1019,6 @@ document.addEventListener('DOMContentLoaded', () => {
         <p>Fetching markets...</p>
       </div>`;
 
-        selectedQueries.clear();
         if (selectAllCb) selectAllCb.checked = false;
         fetchedQueries = [];
         updateAnalyzeBtn();
@@ -706,9 +1029,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) throw new Error(await res.text());
             const data = await safeJson(res);
             fetchedQueries = data.queries || [];
+            addFrontendLog('MARKETS_FETCHED', `Fetched ${fetchedQueries.length} market(s).`, 'info', { sector: selectedSector, subsectors: Array.from(selectedSubsectors) });
             renderMarketCards();
         } catch (e) {
             console.error('Query fetch error:', e);
+            addFrontendLog('MARKETS_FETCH_FAILED', 'Failed to fetch markets.', 'error', { error: e.message });
             marketGrid.innerHTML = '<div class="error-state" style="grid-column:1/-1;">Failed to fetch markets. Please try again.</div>';
         }
     }
@@ -733,7 +1058,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (selectAllCb && filtered.length > 0) {
-            selectAllCb.checked = filtered.every(q => selectedQueries.has(q.id));
+            selectAllCb.checked = filtered.every(q => selectedQueries.has(String(q.id)));
         }
 
         if (!filtered.length) {
@@ -748,12 +1073,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const volNum = Number(q.volume);
             const vol = (!isNaN(volNum) && volNum > 0) ? '$' + Math.round(volNum).toLocaleString() : '--';
 
-            const isChecked = selectedQueries.has(q.id);
+            const isChecked = selectedQueries.has(String(q.id));
 
             return `
         <div class="market-card" data-id="${q.id}">
           <div class="market-card-top">
-            <input type="checkbox" class="checkbox-custom market-cb" data-id="${q.id}" ${isChecked ? 'checked' : ''} />
+            <input type="checkbox" class="checkbox-custom market-card-checkbox market-cb" data-id="${q.id}" ${isChecked ? 'checked' : ''} />
             <div class="market-card-question">${escapeHtml(q.question)}</div>
           </div>
           <div class="market-card-prices">
@@ -780,11 +1105,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }).join('');
 
         marketGrid.querySelectorAll('.market-cb').forEach(cb => {
-            cb.addEventListener('click', (e) => e.stopPropagation());
             cb.addEventListener('change', () => {
-                if (cb.checked) selectedQueries.add(cb.dataset.id);
+                if (cb.checked) selectedQueries.add(String(cb.dataset.id));
                 else selectedQueries.delete(cb.dataset.id);
-                renderMarketCards();
                 updateAnalyzeBtn();
             });
         });
@@ -798,7 +1121,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
         marketGrid.querySelectorAll('.market-card').forEach(card => {
             card.addEventListener('click', (e) => {
-                if (e.target.closest('.market-cb') || e.target.closest('.analyze-single-btn')) return;
+                if (e.target.closest('.analyze-single-btn')) return;
+
+                // If clicking on the top section (checkbox or question), toggle the checkbox
+                const cardTop = e.target.closest('.market-card-top');
+                if (cardTop) {
+                    const cb = cardTop.querySelector('.market-cb');
+                    if (cb && e.target !== cb) {
+                        cb.checked = !cb.checked;
+                        cb.dispatchEvent(new Event('change'));
+                    }
+                    return;
+                }
+
                 openMarketDetail(card.dataset.id);
             });
         });
@@ -818,38 +1153,135 @@ document.addEventListener('DOMContentLoaded', () => {
     marketSort?.addEventListener('change', renderMarketCards);
 
     async function runAnalysis(queryIdsArray) {
-        if (!queryIdsArray || queryIdsArray.length === 0) return;
+        if (!queryIdsArray || queryIdsArray.length === 0) {
+            addFrontendLog('ANALYZE_SELECTED_SKIPPED', 'Analyze skipped because no markets are selected.', 'warn');
+            showToast('Select at least one market to analyze.', 'info');
+            return;
+        }
 
         const model = document.getElementById('model-select')?.value || 'gemini';
         const analysisGrid = document.getElementById('analysis-grid');
 
         switchMarketTab('analysis');
+
         if (analysisGrid) {
-            analysisGrid.innerHTML = `
-            <div class="empty-state" style="grid-column:1/-1;">
-                <div class="loading-skeleton" style="width:60px;height:60px;border-radius:50%;margin:0 auto 16px; background:var(--accent);"></div>
-                <h3 style="color:var(--text-primary); margin-bottom:8px;">AI is analyzing ${queryIdsArray.length} market(s)</h3>
-                <p style="color:var(--text-secondary); font-size:13px;">Using ${model === 'gemini' ? 'Gemini' : 'Parallel'} model. Parsing order books and historical contexts...</p>
-            </div>`;
-        }
-
-        try {
-            const res = await apiFetch('/api/analyze-selected', {
-                method: 'POST',
-                body: { query_ids: queryIdsArray, model: model }
+            analysisGrid.innerHTML = '';
+            queryIdsArray.forEach(qid => {
+                const q = fetchedQueries.find(item => String(item.id) === String(qid));
+                const question = q ? q.question : 'Market ' + qid;
+                analysisGrid.innerHTML += `
+          <div class="analysis-card rec-hold processing pulsing" id="analysis-card-${qid}" data-id="${qid}">
+            <div class="analysis-card-top">
+              <div class="analysis-card-question">${escapeHtml(question)}</div>
+              <span class="badge badge-secondary">ANALYZING</span>
+            </div>
+            <div class="analysis-card-preview" style="display:flex; flex-direction:column; gap:8px; margin-top:12px; height: 50px;">
+              <div class="shimmer-line" style="width:100%; height:10px; border-radius:4px;"></div>
+              <div class="shimmer-line" style="width:85%; height:10px; border-radius:4px;"></div>
+              <div class="shimmer-line" style="width:60%; height:10px; border-radius:4px;"></div>
+            </div>
+            <div class="analysis-card-footer" style="margin-top:16px;">
+              <span class="analysis-card-time text-muted">Running AI agents...</span>
+              <div class="spinner-small"></div>
+            </div>
+          </div>
+        `;
             });
-            if (!res.ok) throw new Error(await res.text());
-
-            showToast('Analysis complete!', 'success');
-            await fetchAnalyses();
-            fetchDashboardData();
-        } catch (e) {
-            showToast('Analysis failed', 'error');
-            fetchAnalyses();
         }
+
+        addFrontendLog('ANALYZE_SELECTED_START', `Starting analysis-only run for ${queryIdsArray.length} market(s).`, 'info', {
+            query_ids: queryIdsArray,
+            model
+        });
+
+        let completedCount = 0;
+        let failedCount = 0;
+
+        const promises = queryIdsArray.map(async (qid) => {
+            const q = fetchedQueries.find(item => String(item.id) === String(qid));
+            const marketSnapshot = q ? { ...q, id: String(q.id) } : null;
+
+            try {
+                const res = await apiFetch('/api/analyze-selected', {
+                    method: 'POST',
+                    body: {
+                        query_ids: [String(qid)],
+                        model: model,
+                        markets: marketSnapshot ? [marketSnapshot] : []
+                    }
+                });
+
+                if (!res.ok) {
+                    throw new Error(await res.text());
+                }
+
+                const data = await safeJson(res);
+                if (data.results && data.results.length > 0) {
+                    const analysis = data.results[0];
+
+                    // Update cache
+                    analysesCache = analysesCache.filter(x => x.token_id !== qid);
+                    analysesCache.push(analysis);
+
+                    // Replace placeholder card
+                    const cardEl = document.getElementById(`analysis-card-${qid}`);
+                    if (cardEl) {
+                        cardEl.outerHTML = renderSingleAnalysisCard(analysis);
+
+                        // Bind listeners to new card
+                        const newCard = document.getElementById(`analysis-card-${qid}`);
+                        if (newCard) {
+                            newCard.addEventListener('click', (e) => {
+                                e.stopPropagation();
+                                openAnalysisModal(qid);
+                            });
+                            newCard.querySelector('.view-analysis-btn')?.addEventListener('click', (e) => {
+                                e.stopPropagation();
+                                openAnalysisModal(qid);
+                            });
+                        }
+                    }
+                    completedCount++;
+                } else {
+                    throw new Error('No analysis results returned.');
+                }
+            } catch (err) {
+                console.error(`Analysis failed for query ${qid}:`, err);
+                failedCount++;
+                const cardEl = document.getElementById(`analysis-card-${qid}`);
+                if (cardEl) {
+                    cardEl.className = 'analysis-card rec-no';
+                    cardEl.innerHTML = `
+            <div class="analysis-card-top">
+              <div class="analysis-card-question">${escapeHtml(q ? q.question : 'Market ' + qid)}</div>
+              <span class="badge badge-red">FAILED</span>
+            </div>
+            <div class="analysis-card-preview" style="color:var(--red); margin-top:12px;">
+              AI analysis failed. Please verify API keys and network connectivity.
+            </div>
+            <div class="analysis-card-footer" style="margin-top:16px;">
+              <span class="analysis-card-time text-muted">Error occurred</span>
+            </div>
+          `;
+                }
+            }
+        });
+
+        await Promise.all(promises);
+
+        if (completedCount > 0) {
+            showToast(`Analysis complete: ${completedCount} succeeded` + (failedCount > 0 ? `, ${failedCount} failed` : ''), 'success');
+        } else if (failedCount > 0) {
+            showToast(`Analysis failed for all selected markets.`, 'error');
+        }
+
+        // Refresh state and other widgets
+        fetchDashboardData();
     }
 
-    analyzeSelectedBtn?.addEventListener('click', () => {
+    analyzeSelectedBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        addFrontendLog('ANALYZE_SELECTED_BUTTON', 'Analyze Selected button handler fired.', 'info', { selected_count: selectedQueries.size });
         runAnalysis(Array.from(selectedQueries));
     });
 
@@ -936,54 +1368,69 @@ document.addEventListener('DOMContentLoaded', () => {
         const asksEl = document.getElementById('ob-asks');
         if (!bidsEl || !asksEl) return;
 
-        bidsEl.innerHTML = '<div class="text-muted" style="font-size:11px;">Loading live book...</div>';
-        asksEl.innerHTML = '<div class="text-muted" style="font-size:11px;">Loading live book...</div>';
-        liveOrderBooks = { yes: [], no: [] };
+        // Only show loading skeleton on first load (avoid flicker on auto-refresh)
+        if (!bidsEl.children.length || bidsEl.querySelector('.text-muted')) {
+            bidsEl.innerHTML = '<div class="text-muted" style="font-size:11px;">Loading live book...</div>';
+            asksEl.innerHTML = '<div class="text-muted" style="font-size:11px;">Loading live book...</div>';
+        }
 
         try {
-            // 1. Fetch the full market data to get the distinct CLOB Token IDs for YES and NO
-            const res = await fetch(`https://gamma-api.polymarket.com/markets/${market.id}`);
-            if (!res.ok) throw new Error("Failed to fetch market details");
-            const gammaData = await res.json();
+            // Fetch via backend proxy (avoids CORS, resolves CLOB token IDs server-side)
+            const res = await apiFetch(`/api/orderbook/${market.id}`);
+            if (!res.ok) throw new Error(`Orderbook proxy error: ${res.status}`);
+            const data = await res.json();
 
-            const clobTokenIds = gammaData.clobTokenIds || [];
-            if (clobTokenIds.length < 2) throw new Error("Missing clobTokenIds");
+            const yesBook = data.yes || {};
+            const noBook = data.no || {};
 
-            // 2. Fetch the live YES and NO order books in parallel
-            const [yesRes, noRes] = await Promise.all([
-                fetch(`https://clob.polymarket.com/book?token_id=${clobTokenIds[0]}`),
-                fetch(`https://clob.polymarket.com/book?token_id=${clobTokenIds[1]}`)
-            ]);
-
-            const yesBook = await yesRes.json();
-            const noBook = await noRes.json();
-
-            // 3. Store sorted asks (ascending price) for the calculator to sweep
+            // Store sorted asks (ascending price) for the calculator to sweep
             liveOrderBooks.yes = (yesBook.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a, b) => a.price - b.price);
             liveOrderBooks.no = (noBook.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a, b) => a.price - b.price);
 
-            // 4. Display the live YES book in the UI
+            // Display the live YES book in the UI (Bids highest first, Asks lowest first)
             let bidsHtml = '', asksHtml = '';
-            const displayBids = yesBook.bids || [];
+
+            const displayBids = (yesBook.bids || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a, b) => b.price - a.price);
+            let cumulativeBidTotal = 0;
             for (let i = 0; i < Math.min(4, displayBids.length); i++) {
-                bidsHtml += `<div style="display:flex; justify-content:space-between;"><span class="text-secondary">${Math.round(parseFloat(displayBids[i].size))}</span><span class="text-green">${parseFloat(displayBids[i].price).toFixed(3)}</span></div>`;
+                const rawSize = displayBids[i].size;
+                const rawPrice = displayBids[i].price;
+                cumulativeBidTotal += rawSize * rawPrice;
+
+                const size = Math.round(rawSize).toLocaleString();
+                const price = (rawPrice * 100).toFixed(1).replace(/\.0$/, '') + '¢';
+                const total = '$' + cumulativeBidTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                bidsHtml += `<div style="display:grid; grid-template-columns: 1fr 1fr 1.2fr;"><span class="text-green">${price}</span><span class="text-secondary" style="text-align:right;">${size}</span><span class="text-secondary" style="text-align:right;">${total}</span></div>`;
             }
 
-            const displayAsks = yesBook.asks || [];
+            const displayAsks = (yesBook.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a, b) => a.price - b.price);
+            let cumulativeAskTotal = 0;
             for (let i = 0; i < Math.min(4, displayAsks.length); i++) {
-                asksHtml += `<div style="display:flex; justify-content:space-between;"><span class="text-red">${parseFloat(displayAsks[i].price).toFixed(3)}</span><span class="text-secondary">${Math.round(parseFloat(displayAsks[i].size))}</span></div>`;
+                const rawSize = displayAsks[i].size;
+                const rawPrice = displayAsks[i].price;
+                cumulativeAskTotal += rawSize * rawPrice;
+
+                const size = Math.round(rawSize).toLocaleString();
+                const price = (rawPrice * 100).toFixed(1).replace(/\.0$/, '') + '¢';
+                const total = '$' + cumulativeAskTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                asksHtml += `<div style="display:grid; grid-template-columns: 1fr 1fr 1.2fr;"><span class="text-red">${price}</span><span class="text-secondary" style="text-align:right;">${size}</span><span class="text-secondary" style="text-align:right;">${total}</span></div>`;
             }
 
             bidsEl.innerHTML = bidsHtml || '<div class="text-muted">No bids</div>';
             asksEl.innerHTML = asksHtml || '<div class="text-muted">No asks</div>';
 
-            // 5. Trigger the calculator to update with the new live data
+            // Trigger the calculator to update with the new live data
             updateCalculator();
 
         } catch (e) {
             console.error("Failed to load real order book:", e);
-            bidsEl.innerHTML = '<div class="text-red" style="font-size:11px;">Failed to load</div>';
-            asksEl.innerHTML = '<div class="text-red" style="font-size:11px;">Failed to load</div>';
+            // Only show error on first load, keep existing data on refresh failures
+            if (bidsEl.querySelector('.text-muted')) {
+                bidsEl.innerHTML = '<div class="text-red" style="font-size:11px;">Failed to load</div>';
+                asksEl.innerHTML = '<div class="text-red" style="font-size:11px;">Failed to load</div>';
+            }
             updateCalculator();
         }
     }
@@ -1014,8 +1461,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (descEl) descEl.textContent = q.description || 'No specific rules or description provided by the oracle for this market.';
 
-        // Load actual live data instead of mock
+        // Load actual live data and start auto-refresh
+        if (orderBookPollInterval) clearInterval(orderBookPollInterval);
         loadLiveOrderBook(q);
+        orderBookPollInterval = setInterval(() => {
+            if (currentDetailMarket) loadLiveOrderBook(currentDetailMarket);
+        }, 5000);
 
         if (calcAmount) calcAmount.value = 100;
         updateCalculator();
@@ -1025,6 +1476,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     document.getElementById('close-market-detail')?.addEventListener('click', () => {
+        if (orderBookPollInterval) { clearInterval(orderBookPollInterval); orderBookPollInterval = null; }
+        currentDetailMarket = null;
         document.getElementById('market-detail-modal')?.classList.add('hidden');
     });
 
@@ -1068,32 +1521,49 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        analysisGrid.innerHTML = filtered.map(a => {
-            const rec = a.recommended_side?.toUpperCase() || 'HOLD';
-            const recClass = `rec-${rec.toLowerCase()}`;
-            return `
-        <div class="analysis-card ${recClass}" data-id="${a.token_id}">
-          <div class="analysis-card-top">
-            <div class="analysis-card-question">${escapeHtml(a.question || 'Unknown Market')}</div>
-            <span class="badge ${rec === 'YES' ? 'badge-green' : rec === 'NO' ? 'badge-red' : 'badge-secondary'}">${rec}</span>
-          </div>
-          <div class="analysis-card-preview">
-            ${escapeHtml(a.reasoning || '').substring(0, 100)}...
-          </div>
-          <div class="analysis-card-footer">
-            <span class="analysis-card-time">Conf: ${a.confidence || 0}%</span>
-            <button class="btn btn-secondary btn-sm view-analysis-btn" data-id="${a.token_id}">View Details</button>
-          </div>
-        </div>
-      `;
-        }).join('');
+        analysisGrid.innerHTML = filtered.map(renderSingleAnalysisCard).join('');
+
+        analysisGrid.querySelectorAll('.analysis-cb').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                e.stopPropagation();
+                if (cb.checked) selectedQueries.add(String(cb.dataset.id));
+                else selectedQueries.delete(cb.dataset.id);
+                updateAnalyzeBtn();
+            });
+            cb.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+        });
 
         analysisGrid.querySelectorAll('.view-analysis-btn, .analysis-card').forEach(el => {
             el.addEventListener('click', (e) => {
+                if (e.target.closest('.analysis-cb')) return;
                 const id = el.dataset.id || el.closest('.analysis-card').dataset.id;
                 openAnalysisModal(id);
             });
         });
+    }
+
+    function renderSingleAnalysisCard(a) {
+        const rec = a.recommended_side?.toUpperCase() || 'HOLD';
+        const recClass = `rec-${rec.toLowerCase()}`;
+        const isChecked = selectedQueries.has(String(a.token_id));
+        return `
+      <div class="analysis-card ${recClass}" id="analysis-card-${a.token_id}" data-id="${a.token_id}">
+        <div class="analysis-card-top">
+          <input type="checkbox" class="checkbox-custom analysis-cb" data-id="${a.token_id}" ${isChecked ? 'checked' : ''} style="margin-right: 8px;" />
+          <div class="analysis-card-question">${escapeHtml(a.question || 'Unknown Market')}</div>
+          <span class="badge ${rec === 'YES' ? 'badge-green' : rec === 'NO' ? 'badge-red' : 'badge-secondary'}">${rec}</span>
+        </div>
+        <div class="analysis-card-preview">
+          ${escapeHtml(a.reasoning || '').substring(0, 100)}...
+        </div>
+        <div class="analysis-card-footer">
+          <span class="analysis-card-time">Conf: ${a.confidence || 0}%</span>
+          <button class="btn btn-secondary btn-sm view-analysis-btn" data-id="${a.token_id}">View Details</button>
+        </div>
+      </div>
+    `;
     }
 
     analysisSearch?.addEventListener('input', renderAnalysisCards);
@@ -1125,6 +1595,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (analysisModal) analysisModal.classList.remove('hidden');
+        updateQuickTradeEstimate();
 
         fetchAndRenderAnalysisHistory(tokenId);
     }
@@ -1230,6 +1701,39 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function updateQuickTradeEstimate() {
+        const estimateEl = document.getElementById('modal-trade-estimate');
+        if (!estimateEl || !currentAnalysis) return;
+
+        const sideValue = document.getElementById('modal-trade-side')?.value || 'buy_yes';
+        const amount = Number(document.getElementById('modal-trade-amount')?.value || 0);
+
+        let action = 'BUY';
+        let side = 'YES';
+        if (sideValue === 'buy_no') { action = 'BUY'; side = 'NO'; }
+        else if (sideValue === 'sell_yes') { action = 'SELL'; side = 'YES'; }
+        else if (sideValue === 'sell_no') { action = 'SELL'; side = 'NO'; }
+
+        const price = side === 'YES' ? currentAnalysis.yes_price : currentAnalysis.no_price;
+
+        if (amount <= 0 || !price || price <= 0) {
+            estimateEl.innerHTML = '';
+            return;
+        }
+
+        if (action === 'BUY') {
+            const shares = amount / price;
+            estimateEl.innerHTML = `Est. Shares to get: <span class="text-green" style="font-weight:700;">${shares.toFixed(4)} ${side}</span> <span style="color:var(--text-muted); font-size:11px;">(@ $${price.toFixed(3)}/sh)</span>`;
+        } else {
+            const proceeds = amount;
+            const sharesNeeded = amount / price;
+            estimateEl.innerHTML = `Est. Shares to sell: <span class="text-red" style="font-weight:700;">${sharesNeeded.toFixed(4)} ${side}</span> to receive <span class="text-green" style="font-weight:700;">$${proceeds.toFixed(2)} USD</span> <span style="color:var(--text-muted); font-size:11px;">(@ $${price.toFixed(3)}/sh)</span>`;
+        }
+    }
+
+    document.getElementById('modal-trade-amount')?.addEventListener('input', updateQuickTradeEstimate);
+    document.getElementById('modal-trade-side')?.addEventListener('change', updateQuickTradeEstimate);
+
     document.getElementById('close-analysis-modal')?.addEventListener('click', () => {
         if (analysisModal) analysisModal.classList.add('hidden');
     });
@@ -1255,7 +1759,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await apiFetch('/api/trade', {
                 method: 'POST',
-                body: JSON.stringify({
+                body: {
                     question: currentAnalysis.question || '',
                     side: side,
                     action: action,
@@ -1263,7 +1767,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     token_id: currentAnalysis.token_id,
                     price: price || 0.5,
                     category: currentAnalysis.category || "General"
-                })
+                }
             });
 
             if (res.ok) {
@@ -1306,12 +1810,38 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) return;
             const data = await safeJson(res);
             if (data.config) {
-                const isLive = String(data.config.LIVE_TRADING).toLowerCase() === 'true';
+                const readiness = data.live_readiness || {};
+                const isLive = String(data.config.LIVE_TRADING).toLowerCase() === 'true' && readiness.ready === true;
 
                 const modeSelect = document.getElementById('setting-trading-mode');
-                if (modeSelect) modeSelect.value = isLive ? 'live' : 'paper';
+                if (modeSelect) {
+                    modeSelect.value = isLive ? 'live' : 'paper';
+                    const liveOption = Array.from(modeSelect.options).find(o => o.value === 'live');
+                    if (liveOption) {
+                        liveOption.disabled = readiness.ready !== true;
+                        liveOption.textContent = readiness.ready === true ? 'Live' : 'Live (locked until CLOB credentials are configured)';
+                    }
+                }
                 const minConf = document.getElementById('setting-min-confidence');
                 if (minConf) minConf.value = data.config.MIN_CONFIDENCE || 70;
+
+                const maxSpread = document.getElementById('setting-max-spread-limit');
+                if (maxSpread) maxSpread.value = data.config.MAX_SPREAD_LIMIT !== undefined ? Math.round(data.config.MAX_SPREAD_LIMIT * 100) : 10;
+
+                const minEdge = document.getElementById('setting-min-edge');
+                if (minEdge) minEdge.value = data.config.MIN_EDGE !== undefined ? Math.round(data.config.MIN_EDGE * 100) : 5;
+
+                const minLiq = document.getElementById('setting-min-liquidity');
+                if (minLiq) minLiq.value = data.config.MIN_LIQUIDITY !== undefined ? data.config.MIN_LIQUIDITY : 50;
+
+                const minDepth = document.getElementById('setting-min-depth');
+                if (minDepth) minDepth.value = data.config.MIN_DEPTH !== undefined ? data.config.MIN_DEPTH : 500;
+
+                const liberalMode = document.getElementById('setting-liberal-mode');
+                if (liberalMode) liberalMode.value = String(data.config.LIBERAL_MODE).toLowerCase() === 'true' ? 'true' : 'false';
+
+                const simulateProfit = document.getElementById('setting-simulate-profit');
+                if (simulateProfit) simulateProfit.value = String(data.config.SIMULATE_PROFIT).toLowerCase() === 'true' ? 'true' : 'false';
 
                 const modeDisplay = document.getElementById('trading-mode-display');
                 if (modeDisplay) {
@@ -1327,23 +1857,41 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('save-settings-btn')?.addEventListener('click', async () => {
         const mode = document.getElementById('setting-trading-mode')?.value;
         const minConf = document.getElementById('setting-min-confidence')?.value;
+        const maxSpread = document.getElementById('setting-max-spread-limit')?.value;
+        const minEdge = document.getElementById('setting-min-edge')?.value;
+        const minLiq = document.getElementById('setting-min-liquidity')?.value;
+        const minDepth = document.getElementById('setting-min-depth')?.value;
+        const liberalMode = document.getElementById('setting-liberal-mode')?.value;
+        const simulateProfit = document.getElementById('setting-simulate-profit')?.value;
+
+        if (mode === 'live') {
+            const ok = await showConfirm('Live Trading Locked', 'Live mode requires signed Polymarket CLOB execution credentials and backend approval. Save as paper mode instead?', 'danger');
+            if (!ok) return;
+        }
 
         try {
             const res = await apiFetch('/api/config', {
                 method: 'POST',
                 body: {
-                    LIVE_TRADING: mode === 'live',
-                    MIN_CONFIDENCE: Number(minConf)
+                    LIVE_TRADING: false,
+                    MIN_CONFIDENCE: Number(minConf),
+                    MAX_SPREAD_LIMIT: Number(maxSpread) / 100,
+                    MIN_EDGE: Number(minEdge) / 100,
+                    MIN_LIQUIDITY: Number(minLiq),
+                    MIN_DEPTH: Number(minDepth),
+                    LIBERAL_MODE: liberalMode === 'true',
+                    SIMULATE_PROFIT: simulateProfit === 'true'
                 }
             });
             if (res.ok) {
                 showToast('Settings saved successfully.', 'success');
                 fetchConfig();
             } else {
-                showToast('Failed to save settings.', 'error');
+                const errText = await res.text();
+                showToast('Failed to save settings: ' + errText, 'error');
             }
         } catch (e) {
-            showToast('Error saving settings.', 'error');
+            showToast('Error saving settings: ' + e.message, 'error');
         }
     });
 
@@ -1465,47 +2013,887 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!history.length) {
                     tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No trades yet. Start the engine to begin.</td></tr>';
                 } else {
-                    tbody.innerHTML = history.slice(0, 5).map(t => `
+                    tbody.innerHTML = history.slice(0, 5).map(t => {
+                        const displaySide = t.side === 'YES' || t.side === 'NO' ? `BUY ${t.side}` : t.side.replace('CLOSE', 'SELL');
+                        return `
             <tr>
               <td>${formatTime(t.timestamp)}</td>
               <td class="truncate" style="max-width:200px;" title="${escapeHtml(t.question)}">${escapeHtml(t.question)}</td>
-              <td><span class="badge badge-${t.side.includes('YES') ? 'green' : 'red'}">${escapeHtml(t.side)}</span></td>
+              <td><span class="badge badge-${t.side.includes('YES') ? 'green' : 'red'}">${escapeHtml(displaySide)}</span></td>
               <td style="text-align:right;">${formatUsd(t.amount)}</td>
               <td style="text-align:right;">$${t.price.toFixed(3)}</td>
               <td>${escapeHtml(t.status)}</td>
             </tr>
-          `).join('');
+          `}).join('');
                 }
             }
 
+            renderMarketRecommendations(history);
             renderBalanceChart(history, balanceNum);
         } catch (e) { console.error('fetchDashboardData error:', e); }
     }
 
+    let hasLiveAIRecommendations = false;
+
+    function renderMarketRecommendations(history) {
+        if (hasLiveAIRecommendations) return;
+        const profList = document.getElementById('profitable-queries-list');
+        const stableList = document.getElementById('stable-queries-list');
+        if (!profList || !stableList) return;
+
+        if (!history || history.length === 0) {
+            profList.innerHTML = '<div class="empty-state" style="padding:16px;">No trade data available yet.</div>';
+            stableList.innerHTML = '<div class="empty-state" style="padding:16px;">No trade data available yet.</div>';
+            return;
+        }
+
+        const queryStats = {};
+        history.forEach(t => {
+            const q = t.question || 'Unknown';
+            const c = t.category || 'Other';
+            if (!queryStats[q]) {
+                queryStats[q] = { pnl: 0, wins: 0, losses: 0, total: 0, category: c };
+            }
+            const pnl = t.pnl || 0;
+            queryStats[q].pnl += pnl;
+            if (t.side.startsWith('SELL') || t.side.startsWith('CLOSE')) {
+                queryStats[q].total++;
+                if (pnl > 0) queryStats[q].wins++;
+                else queryStats[q].losses++;
+            }
+        });
+
+        const queries = Object.keys(queryStats).map(q => ({ question: q, ...queryStats[q] }));
+        const byCategory = {};
+        queries.forEach(q => {
+            if (!byCategory[q.category]) byCategory[q.category] = [];
+            byCategory[q.category].push(q);
+        });
+
+        let profitableHtml = '';
+        let stableHtml = '';
+
+        for (const [cat, qs] of Object.entries(byCategory)) {
+            const profitable = qs.filter(q => q.pnl > 0).sort((a, b) => b.pnl - a.pnl).slice(0, 3);
+            if (profitable.length > 0) {
+                profitableHtml += `<div style="margin-bottom: 12px;"><h5 style="font-size:11px; color:var(--text-primary); margin-bottom:6px;">${escapeHtml(cat)}</h5>`;
+                profitableHtml += profitable.map(q => `
+          <div style="display:flex; justify-content:space-between; align-items:center; background:var(--bg-input); padding:8px 12px; border-radius:6px; border:1px solid var(--border); margin-bottom:4px; cursor:pointer;" onclick="window.marketSearchAndSelect('${escapeHtml(q.question).replace(/'/g, "\\'")}')">
+            <span class="truncate" style="max-width: 65%; font-size:11px; font-weight:600;" title="${escapeHtml(q.question)}">${escapeHtml(q.question)}</span>
+            <span style="color:var(--green); font-family:var(--font-mono); font-size:11px; font-weight:700;">+${formatUsd(q.pnl)}</span>
+          </div>
+        `).join('');
+                profitableHtml += `</div>`;
+            }
+
+            const stable = qs.filter(q => q.total >= 1).map(q => ({
+                ...q, winRate: q.wins / q.total
+            })).sort((a, b) => b.winRate - a.winRate || b.pnl - a.pnl).slice(0, 3);
+
+            if (stable.length > 0) {
+                stableHtml += `<div style="margin-bottom: 12px;"><h5 style="font-size:11px; color:var(--text-primary); margin-bottom:6px;">${escapeHtml(cat)}</h5>`;
+                stableHtml += stable.map(q => `
+          <div style="display:flex; justify-content:space-between; align-items:center; background:var(--bg-input); padding:8px 12px; border-radius:6px; border:1px solid var(--border); margin-bottom:4px; cursor:pointer;" onclick="window.marketSearchAndSelect('${escapeHtml(q.question).replace(/'/g, "\\'")}')">
+            <span class="truncate" style="max-width: 65%; font-size:11px; font-weight:600;" title="${escapeHtml(q.question)}">${escapeHtml(q.question)}</span>
+            <span style="color:var(--blue); font-family:var(--font-mono); font-size:11px; font-weight:700;">${Math.round(q.winRate * 100)}% Win Rate</span>
+          </div>
+        `).join('');
+                stableHtml += `</div>`;
+            }
+        }
+
+        if (!profitableHtml) profitableHtml = '<div class="empty-state" style="padding:16px; font-size:12px;">No profitable queries found yet.</div>';
+        if (!stableHtml) stableHtml = '<div class="empty-state" style="padding:16px; font-size:12px;">No completed trades to analyze stability.</div>';
+
+        profList.innerHTML = profitableHtml;
+        stableList.innerHTML = stableHtml;
+    }
+
+    window.marketSearchAndSelect = (question) => {
+        navigateTo('markets');
+        switchMarketTab('discover');
+        const searchInput = document.getElementById('market-search');
+        if (searchInput) {
+            searchInput.value = question;
+            searchInput.dispatchEvent(new Event('input'));
+        }
+    };
+
+    document.getElementById('generate-ai-recommendations-btn')?.addEventListener('click', async () => {
+        const btn = document.getElementById('generate-ai-recommendations-btn');
+        const status = document.getElementById('ai-recommendations-status');
+        if (btn) btn.disabled = true;
+        if (status) status.style.display = 'block';
+
+        try {
+            const res = await apiFetch('/api/ai_recommendations', {
+                method: 'POST',
+                body: { model: document.getElementById('model-select')?.value || 'gemini' }
+            });
+            if (res.ok) {
+                const data = await safeJson(res);
+                hasLiveAIRecommendations = true;
+                renderLiveAIRecommendations(data.recommendations || { profitable: [], stable: [] });
+            } else {
+                showToast('Failed to generate AI recommendations', 'error');
+            }
+        } catch (e) {
+            console.error(e);
+            showToast('Error connecting to backend for recommendations', 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+            if (status) status.style.display = 'none';
+        }
+    });
+
+    function renderLiveAIRecommendations(recs) {
+        const profList = document.getElementById('profitable-queries-list');
+        const stableList = document.getElementById('stable-queries-list');
+        if (!profList || !stableList) return;
+
+        // Group profitable by category
+        const profByCategory = {};
+        (recs.profitable || []).forEach(q => {
+            const c = q.category || 'Other';
+            if (!profByCategory[c]) profByCategory[c] = [];
+            profByCategory[c].push(q);
+        });
+
+        let profitableHtml = '';
+        for (const [cat, qs] of Object.entries(profByCategory)) {
+            profitableHtml += `<div style="margin-bottom: 12px;"><h5 style="font-size:11px; color:var(--text-primary); margin-bottom:6px;">${escapeHtml(cat)}</h5>`;
+            profitableHtml += qs.map(q => `
+        <div style="background:var(--bg-input); padding:10px 12px; border-radius:6px; border:1px solid var(--border); margin-bottom:6px; cursor:pointer;" onclick="window.marketSearchAndSelect('${escapeHtml(q.question).replace(/'/g, "\\'")}')">
+          <div style="display:flex; justify-content:space-between; margin-bottom: 4px;">
+            <span class="truncate" style="max-width: 65%; font-size:12px; font-weight:600;" title="${escapeHtml(q.question)}">${escapeHtml(q.question)}</span>
+            <span style="color:var(--green); font-family:var(--font-mono); font-size:11px; font-weight:700;">+${formatUsd(Number(q.pnl) || 0)} Est. PnL</span>
+          </div>
+          <div style="font-size:11px; color:var(--text-muted); line-height: 1.4;">${escapeHtml(q.reasoning || '')}</div>
+        </div>
+      `).join('');
+            profitableHtml += `</div>`;
+        }
+
+        // Group stable by category
+        const stableByCategory = {};
+        (recs.stable || []).forEach(q => {
+            const c = q.category || 'Other';
+            if (!stableByCategory[c]) stableByCategory[c] = [];
+            stableByCategory[c].push(q);
+        });
+
+        let stableHtml = '';
+        for (const [cat, qs] of Object.entries(stableByCategory)) {
+            stableHtml += `<div style="margin-bottom: 12px;"><h5 style="font-size:11px; color:var(--text-primary); margin-bottom:6px;">${escapeHtml(cat)}</h5>`;
+            stableHtml += qs.map(q => `
+        <div style="background:var(--bg-input); padding:10px 12px; border-radius:6px; border:1px solid var(--border); margin-bottom:6px; cursor:pointer;" onclick="window.marketSearchAndSelect('${escapeHtml(q.question).replace(/'/g, "\\'")}')">
+          <div style="display:flex; justify-content:space-between; margin-bottom: 4px;">
+            <span class="truncate" style="max-width: 65%; font-size:12px; font-weight:600;" title="${escapeHtml(q.question)}">${escapeHtml(q.question)}</span>
+            <span style="color:var(--blue); font-family:var(--font-mono); font-size:11px; font-weight:700;">${Math.round((Number(q.winRate) || 0) * 100)}% Win Rate</span>
+          </div>
+          <div style="font-size:11px; color:var(--text-muted); line-height: 1.4;">${escapeHtml(q.reasoning || '')}</div>
+        </div>
+      `).join('');
+            stableHtml += `</div>`;
+        }
+
+        if (!profitableHtml) profitableHtml = '<div class="empty-state" style="padding:16px; font-size:12px;">No profitable queries found.</div>';
+        if (!stableHtml) stableHtml = '<div class="empty-state" style="padding:16px; font-size:12px;">No stable queries found.</div>';
+
+        profList.innerHTML = profitableHtml;
+        stableList.innerHTML = stableHtml;
+    }
+
     async function fetchPositions() {
         try {
-            const res = await apiFetch('/api/positions');
+            // 1. Fetch balance
+            const balRes = await apiFetch('/api/balance');
+            if (balRes.ok) {
+                const balData = await safeJson(balRes);
+                portfolioData.balance = balData.balance || 0;
+            }
+
+            // 2. Fetch positions
+            const res = await apiFetch('/api/portfolio');
             if (!res.ok) return;
             const data = await safeJson(res);
+            portfolioData.positions = data.portfolio || [];
+
+            // 3. Fetch history
+            const histRes = await apiFetch('/api/history');
+            if (histRes.ok) {
+                const histData = await safeJson(histRes);
+                portfolioData.history = histData.history || [];
+            }
+
+            // 4. Render Table
             const tbody = document.getElementById('positions-body');
             if (tbody) {
-                if (!data.positions || !data.positions.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No active positions.</td></tr>';
+                if (!portfolioData.positions || !portfolioData.positions.length) {
+                    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No positions found.</td></tr>';
                 } else {
-                    tbody.innerHTML = data.positions.map(p => `
-            <tr>
-              <td class="truncate" style="max-width:250px;" title="${escapeHtml(p.asset)}">${escapeHtml(p.asset)}</td>
-              <td><span class="badge badge-${p.side.toLowerCase() === 'yes' ? 'green' : 'red'}">${escapeHtml(p.side)}</span></td>
-              <td style="text-align:right;">${p.size.toFixed(2)}</td>
-              <td style="text-align:right;">$${p.entry_price.toFixed(3)}</td>
-              <td style="text-align:right;">$${(p.current_price || p.entry_price).toFixed(3)}</td>
-              <td style="text-align:right;" class="text-${p.pnl >= 0 ? 'green' : 'red'}">${p.pnl >= 0 ? '+' : ''}${formatUsd(p.pnl || 0)}</td>
-            </tr>
-          `).join('');
+                    // Filter only active positions for table display (matching original dashboard view behavior)
+                    const activePos = portfolioData.positions.filter(p =>
+                        ['CREATED', 'ANALYZED', 'BUY_PLACED', 'BUY_FILLED', 'HOLDING', 'PARTIAL_SELL', 'STOPPED'].includes(p.status) &&
+                        parseFloat(p.shares || p.size || 0) > 0
+                    );
+
+                    if (!activePos.length) {
+                        tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No active positions.</td></tr>';
+                    } else {
+                        tbody.innerHTML = activePos.map(p => {
+                            const sideClass = p.side.toLowerCase() === 'yes' ? 'green' : 'red';
+                            const isClosed = p.status === 'SOLD' || p.status === 'CLOSED';
+                            const isStopped = p.status === 'STOPPED';
+                            const pnl = p.pnl || 0;
+                            const pnlClass = pnl >= 0 ? 'green' : 'red';
+                            const pnlSign = pnl >= 0 ? '+' : '';
+                            const roi = p.roi || 0;
+                            const roiClass = roi >= 0 ? 'green' : 'red';
+                            const roiSign = roi >= 0 ? '+' : '';
+
+                            // Build action buttons
+                            let actionsHtml = '';
+                            if (isClosed) {
+                                actionsHtml = `<button class="btn btn-secondary btn-sm archive-pos-btn" data-id="${p.market_id}">Archive</button>`;
+                            } else {
+                                const autoBtnText = p.auto_trading_enabled && !isStopped ? 'Stop Auto' : 'Resume Auto';
+                                const autoBtnClass = p.auto_trading_enabled && !isStopped ? 'btn-red' : 'btn-primary';
+                                actionsHtml = `
+                  <div style="display: flex; gap: 4px; justify-content: center;">
+                    <button class="btn ${autoBtnClass} btn-sm toggle-auto-btn" data-id="${p.market_id}" data-enabled="${p.auto_trading_enabled && !isStopped}">${autoBtnText}</button>
+                    <button class="btn btn-secondary btn-sm manual-sell-btn" data-id="${p.market_id}" data-side="${p.side}" data-shares="${p.shares || p.size}" data-price="${p.current_price || p.entry_price}" data-question="${escapeHtml(p.question)}">Sell</button>
+                  </div>
+                `;
+                            }
+
+                            const autoTradingStatusIcon = p.auto_trading_enabled && !isClosed && !isStopped ? '▶' : '⏸';
+                            const autoTradingStatusColor = p.auto_trading_enabled && !isClosed && !isStopped ? 'var(--green)' : 'var(--text-muted)';
+                            const autoTradingText = p.auto_trading_enabled && !isClosed && !isStopped ? 'Active' : 'Stopped';
+
+                            return `
+                <tr>
+                  <td class="truncate" style="max-width:250px; cursor:pointer; font-weight: 600; text-decoration: underline;" title="Click to view activity log" onclick="window.openPositionLogModal('${p.market_id}')">
+                    ${escapeHtml(p.question)}
+                  </td>
+                  <td><span class="badge badge-${sideClass}">${escapeHtml(p.side)}</span></td>
+                  <td><span class="badge badge-${p.status === 'HOLDING' ? 'green' : p.status === 'STOPPED' ? 'orange' : 'ghost'}">${escapeHtml(p.status)}</span></td>
+                  <td>
+                    <span style="color: ${autoTradingStatusColor}; font-size: 11px; margin-right: 4px;">${autoTradingStatusIcon}</span>
+                    <span style="font-size: 12px; font-weight: 500;">${autoTradingText}</span>
+                  </td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-size:12px;">${(p.shares || p.size || 0).toFixed(4)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-size:12px;">$${(p.entry_price || 0).toFixed(4)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-size:12px;">$${(p.current_price || 0).toFixed(4)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-size:12px;" class="text-${pnlClass}">${pnlSign}${formatUsd(pnl)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-size:12px;" class="text-${roiClass}">${roiSign}${roi.toFixed(2)}%</td>
+                  <td><span class="badge badge-purple">${escapeHtml(p.category || 'Paper')}</span></td>
+                  <td style="text-align:center;">${actionsHtml}</td>
+                </tr>
+              `;
+                        }).join('');
+
+                        // Bind event listeners for buttons
+                        tbody.querySelectorAll('.archive-pos-btn').forEach(btn => {
+                            btn.addEventListener('click', async (e) => {
+                                e.stopPropagation();
+                                const marketId = btn.dataset.id;
+                                await archivePosition(marketId);
+                            });
+                        });
+
+                        tbody.querySelectorAll('.toggle-auto-btn').forEach(btn => {
+                            btn.addEventListener('click', async (e) => {
+                                e.stopPropagation();
+                                const marketId = btn.dataset.id;
+                                const enabled = btn.dataset.enabled === 'true';
+                                await toggleAutoTrading(marketId, enabled);
+                            });
+                        });
+
+                        tbody.querySelectorAll('.manual-sell-btn').forEach(btn => {
+                            btn.addEventListener('click', async (e) => {
+                                e.stopPropagation();
+                                const marketId = btn.dataset.id;
+                                const side = btn.dataset.side;
+                                const shares = parseFloat(btn.dataset.shares);
+                                const price = parseFloat(btn.dataset.price);
+                                const question = btn.dataset.question;
+                                await triggerManualSell(marketId, side, shares, price, question);
+                            });
+                        });
+                    }
                 }
             }
-        } catch (e) { console.error('fetchPositions error:', e); }
+
+            // 5. Render Dashboard Charts & KPIs
+            renderPortfolioDashboard();
+        } catch (e) {
+            console.error('fetchPositions error:', e);
+        }
     }
+
+    function renderPortfolioDashboard() {
+        const startInput = document.getElementById('portfolio-start-date');
+        const endInput = document.getElementById('portfolio-end-date');
+        const queryInput = document.getElementById('portfolio-query-filter');
+
+        let startDate = startInput?.value ? new Date(startInput.value + 'T00:00:00') : null;
+        let endDate = endInput?.value ? new Date(endInput.value + 'T23:59:59') : null;
+        let queryFilter = queryInput?.value ? queryInput.value.toLowerCase() : '';
+
+        // Filter Positions and History based on Date Range
+        const closedPositionsInPeriod = [];
+        const activePositionsInPeriod = [];
+        const tradesInPeriod = [];
+
+        // Helper to get close date
+        function getCloseDate(pos) {
+            if (pos.activity_log && pos.activity_log.length) {
+                const sellEvent = pos.activity_log.find(e => ['SELL', 'MANUAL_SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'EXPIRY_CLOSE'].includes(e.action));
+                if (sellEvent) return new Date(sellEvent.timestamp);
+            }
+            return new Date(pos.updated_at || pos.timestamp || pos.created_at);
+        }
+
+        portfolioData.positions.forEach(pos => {
+            const qMatch = !queryFilter || (pos.question || '').toLowerCase().includes(queryFilter) || (pos.category || '').toLowerCase().includes(queryFilter);
+            if (!qMatch) return;
+
+            const isClosed = pos.status === 'SOLD' || pos.status === 'CLOSED';
+            const openDate = new Date(pos.created_at || pos.timestamp);
+
+            if (isClosed) {
+                const closeDate = getCloseDate(pos);
+                if ((!startDate || closeDate >= startDate) && (!endDate || closeDate <= endDate)) {
+                    closedPositionsInPeriod.push({ ...pos, closeDate });
+                }
+            } else {
+                if ((!startDate || openDate >= startDate) && (!endDate || openDate <= endDate)) {
+                    activePositionsInPeriod.push(pos);
+                }
+            }
+        });
+
+        portfolioData.history.forEach(t => {
+            const qMatch = !queryFilter || (t.question || '').toLowerCase().includes(queryFilter) || (t.category || '').toLowerCase().includes(queryFilter);
+            if (!qMatch) return;
+
+            const tradeDate = new Date(t.timestamp);
+            if ((!startDate || tradeDate >= startDate) && (!endDate || tradeDate <= endDate)) {
+                tradesInPeriod.push(t);
+            }
+        });
+
+        // ── 1. Calculate KPI Metrics ────────────────────────────────
+        const activePositionsAll = portfolioData.positions.filter(pos => pos.status !== 'SOLD' && pos.status !== 'CLOSED' && pos.status !== 'ARCHIVED');
+
+        // Total Investment (from filtered active positions)
+        const totalInvestment = activePositionsInPeriod.reduce((sum, pos) => sum + (pos.invested_amount || pos.cost || (pos.shares * pos.entry_price) || pos.amount || 0), 0);
+
+        // Total Profit & Loss
+        let totalProfit = 0;
+        let totalLoss = 0;
+        closedPositionsInPeriod.forEach(pos => {
+            const pnl = pos.realized_pnl || pos.pnl || 0;
+            if (pnl > 0) totalProfit += pnl;
+            else if (pnl < 0) totalLoss += pnl;
+        });
+
+        const periodTradesCount = tradesInPeriod.length;
+
+        // ── 2. Render KPI UI ────────────────────────────────────────
+        const invKpi = document.getElementById('port-investment-kpi');
+        const profitKpi = document.getElementById('port-profit-kpi');
+        const lossKpi = document.getElementById('port-loss-kpi');
+        const tradesKpi = document.getElementById('port-trades-kpi');
+
+        if (invKpi) invKpi.textContent = formatUsd(totalInvestment);
+        if (profitKpi) profitKpi.textContent = '+' + formatUsd(totalProfit);
+        if (lossKpi) lossKpi.textContent = '-' + formatUsd(Math.abs(totalLoss));
+        if (tradesKpi) tradesKpi.textContent = periodTradesCount;
+
+        // ── 3. Render PnL Progression Line Chart ────────────────────
+        renderPnlProgressionChart(closedPositionsInPeriod);
+
+        // ── 4. Render Sector Exposure Chart ─────────────────────────
+        renderSectorExposureChart(activePositionsAll);
+    }
+
+    function renderPnlProgressionChart(closedPositions) {
+        const canvas = document.getElementById('portfolio-pnl-chart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        if (portfolioPnlChart) {
+            portfolioPnlChart.destroy();
+        }
+
+        const sorted = [...closedPositions].sort((a, b) => a.closeDate - b.closeDate);
+
+        let cumulativePnl = 0;
+        const labels = ['Start'];
+        const data = [0];
+
+        sorted.forEach(pos => {
+            cumulativePnl += (pos.realized_pnl || pos.pnl || 0);
+            labels.push(pos.closeDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
+            data.push(cumulativePnl);
+        });
+
+        const isProfit = cumulativePnl >= 0;
+        const lineColor = isProfit ? '#10b981' : '#ef4444';
+        const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+        gradient.addColorStop(0, isProfit ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)');
+        gradient.addColorStop(1, isProfit ? 'rgba(16, 185, 129, 0.0)' : 'rgba(239, 68, 68, 0.0)');
+
+        portfolioPnlChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Cumulative P&L ($)',
+                    data: data,
+                    borderColor: lineColor,
+                    borderWidth: 2,
+                    backgroundColor: gradient,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: sorted.length > 20 ? 0 : 3,
+                    pointHoverRadius: 5,
+                    pointBackgroundColor: lineColor
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            label: function (context) {
+                                return 'PnL: ' + formatUsd(context.parsed.y);
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        ticks: { color: '#888', font: { size: 10 } }
+                    },
+                    y: {
+                        grid: { color: 'rgba(128,128,128,0.1)' },
+                        ticks: { color: '#888', font: { size: 10 } }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderSectorExposureChart(activePositions) {
+        const canvas = document.getElementById('portfolio-exposure-chart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        if (portfolioExposureChart) {
+            portfolioExposureChart.destroy();
+        }
+
+        const sectors = {};
+        activePositions.forEach(pos => {
+            const cat = pos.category || 'Other';
+            const val = pos.current_value || pos.value || 0;
+            sectors[cat] = (sectors[cat] || 0) + val;
+        });
+
+        const labels = Object.keys(sectors);
+        const data = Object.values(sectors);
+
+        if (labels.length === 0) {
+            portfolioExposureChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['No Active Holdings'],
+                    datasets: [{
+                        data: [1],
+                        backgroundColor: ['rgba(128,128,128,0.15)'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#888', font: { size: 11 } }
+                        },
+                        tooltip: { enabled: false }
+                    }
+                }
+            });
+            return;
+        }
+
+        const colors = [
+            '#6366f1', // Indigo
+            '#10b981', // Emerald
+            '#f59e0b', // Amber
+            '#ec4899', // Pink
+            '#3b82f6', // Blue
+            '#8b5cf6', // Violet
+            '#a855f7'  // Purple
+        ];
+
+        portfolioExposureChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: data,
+                    backgroundColor: colors.slice(0, labels.length),
+                    borderWidth: 1,
+                    borderColor: 'rgba(255,255,255,0.05)'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#888',
+                            font: { size: 10, weight: '600' },
+                            boxWidth: 8,
+                            padding: 8
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function (context) {
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const val = context.parsed;
+                                const pct = ((val / total) * 100).toFixed(1);
+                                return `${context.label}: ${formatUsd(val)} (${pct}%)`;
+                            }
+                        }
+                    }
+                },
+                cutout: '65%'
+            }
+        });
+    }
+
+    function initPortfolioDashboardListeners() {
+        const startInput = document.getElementById('portfolio-start-date');
+        const endInput = document.getElementById('portfolio-end-date');
+        const filterBtn = document.getElementById('portfolio-filter-btn');
+        const btn7d = document.getElementById('portfolio-quick-7d');
+        const btn30d = document.getElementById('portfolio-quick-30d');
+        const btnAll = document.getElementById('portfolio-quick-all');
+
+        if (startInput && endInput) {
+            const today = new Date();
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(today.getDate() - 30);
+
+            const formatDate = (d) => {
+                const yyyy = d.getFullYear();
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                return `${yyyy}-${mm}-${dd}`;
+            };
+
+            startInput.value = formatDate(thirtyDaysAgo);
+            endInput.value = formatDate(today);
+        }
+
+        filterBtn?.addEventListener('click', () => {
+            renderPortfolioDashboard();
+        });
+
+        btn7d?.addEventListener('click', () => {
+            const today = new Date();
+            const sevenDaysAgo = new Date();
+            sevenDaysAgo.setDate(today.getDate() - 7);
+
+            const formatDate = (d) => {
+                const yyyy = d.getFullYear();
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                return `${yyyy}-${mm}-${dd}`;
+            };
+
+            if (startInput) startInput.value = formatDate(sevenDaysAgo);
+            if (endInput) endInput.value = formatDate(today);
+            renderPortfolioDashboard();
+        });
+
+        btn30d?.addEventListener('click', () => {
+            const today = new Date();
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(today.getDate() - 30);
+
+            const formatDate = (d) => {
+                const yyyy = d.getFullYear();
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                return `${yyyy}-${mm}-${dd}`;
+            };
+
+            if (startInput) startInput.value = formatDate(thirtyDaysAgo);
+            if (endInput) endInput.value = formatDate(today);
+            renderPortfolioDashboard();
+        });
+
+        btnAll?.addEventListener('click', () => {
+            if (startInput) startInput.value = '';
+            if (endInput) endInput.value = '';
+            renderPortfolioDashboard();
+        });
+    }
+
+    async function archivePosition(marketId) {
+        try {
+            const res = await apiFetch(`/api/portfolio/${marketId}/archive`, { method: 'POST' });
+            if (res.ok) {
+                showToast('Position archived successfully', 'success');
+                fetchPositions();
+            } else {
+                const data = await safeJson(res);
+                showToast('Archive failed: ' + (data.detail || 'Unknown error'), 'error');
+            }
+        } catch (e) {
+            showToast('Archive failed: ' + e.message, 'error');
+        }
+    }
+
+    async function toggleAutoTrading(marketId, currentlyEnabled) {
+        const path = currentlyEnabled ? 'stop-auto-trading' : 'resume-auto-trading';
+        try {
+            const res = await apiFetch(`/api/portfolio/${marketId}/${path}`, { method: 'POST' });
+            if (res.ok) {
+                showToast(`Auto-trading ${currentlyEnabled ? 'stopped' : 'resumed'} successfully`, 'success');
+                fetchPositions();
+            } else {
+                const data = await safeJson(res);
+                showToast('Action failed: ' + (data.detail || 'Unknown error'), 'error');
+            }
+        } catch (e) {
+            showToast('Action failed: ' + e.message, 'error');
+        }
+    }
+
+    const sellModal = document.getElementById('sell-position-modal');
+    const sellModalAmount = document.getElementById('sell-modal-amount');
+    const sellModalEstShares = document.getElementById('sell-modal-est-shares');
+    const sellModalEstReceive = document.getElementById('sell-modal-est-receive');
+
+    function updateSellModalEstimate() {
+        if (!currentSellPosition || !sellModalAmount || !sellModalEstShares || !sellModalEstReceive) return;
+        const amount = Number(sellModalAmount.value) || 0;
+        const sharesHeld = currentSellPosition.shares;
+        const price = currentSellPosition.price;
+
+        let sharesToSell = amount / price;
+        if (sharesToSell > sharesHeld) {
+            sharesToSell = sharesHeld;
+        }
+        const receiveVal = sharesToSell * price;
+
+        sellModalEstShares.textContent = sharesToSell.toFixed(4);
+        sellModalEstReceive.textContent = '$' + receiveVal.toFixed(2);
+    }
+
+    sellModalAmount?.addEventListener('input', updateSellModalEstimate);
+
+    document.getElementById('sell-modal-sell-all')?.addEventListener('click', () => {
+        if (!currentSellPosition || !sellModalAmount) return;
+        const maxVal = currentSellPosition.shares * currentSellPosition.price;
+        sellModalAmount.value = maxVal.toFixed(2);
+        updateSellModalEstimate();
+    });
+
+    const closeSellModal = () => {
+        sellModal?.classList.add('hidden');
+        currentSellPosition = null;
+    };
+
+    document.getElementById('close-sell-modal')?.addEventListener('click', closeSellModal);
+    document.getElementById('cancel-sell-btn')?.addEventListener('click', closeSellModal);
+
+    document.getElementById('execute-sell-btn')?.addEventListener('click', async () => {
+        if (!currentSellPosition || !sellModalAmount) return;
+        const amount = Number(sellModalAmount.value) || 0;
+        const maxVal = currentSellPosition.shares * currentSellPosition.price;
+
+        if (amount <= 0 || amount > maxVal + 0.01) {
+            showToast('Invalid sell amount', 'error');
+            return;
+        }
+
+        try {
+            const res = await apiFetch(`/api/portfolio/${currentSellPosition.marketId}/manual-sell`, {
+                method: 'POST',
+                body: {
+                    side: currentSellPosition.side,
+                    amount: amount,
+                    price: currentSellPosition.price,
+                    question: currentSellPosition.question
+                }
+            });
+            if (res.ok) {
+                showToast('Manual sell executed successfully', 'success');
+                closeSellModal();
+                fetchPositions();
+            } else {
+                const data = await safeJson(res);
+                showToast('Manual sell failed: ' + (data.detail || 'Unknown error'), 'error');
+            }
+        } catch (e) {
+            showToast('Manual sell failed: ' + e.message, 'error');
+        }
+    });
+
+    async function triggerManualSell(marketId, side, shares, price, question) {
+        currentSellPosition = { marketId, side, shares, price, question };
+
+        const maxVal = (shares * price).toFixed(2);
+        const qEl = document.getElementById('sell-modal-question');
+        if (qEl) qEl.textContent = question;
+
+        const sideEl = document.getElementById('sell-modal-side');
+        if (sideEl) {
+            sideEl.textContent = side;
+            sideEl.className = 'badge ' + (side.toLowerCase() === 'yes' ? 'badge-green' : 'badge-red');
+        }
+
+        const shEl = document.getElementById('sell-modal-shares');
+        if (shEl) shEl.textContent = shares.toFixed(4);
+
+        const prEl = document.getElementById('sell-modal-price');
+        if (prEl) prEl.textContent = '$' + price.toFixed(4);
+
+        const valEl = document.getElementById('sell-modal-value');
+        if (valEl) valEl.textContent = '$' + maxVal;
+
+        if (sellModalAmount) {
+            sellModalAmount.value = maxVal;
+        }
+
+        updateSellModalEstimate();
+
+        sellModal?.classList.remove('hidden');
+    }
+
+    window.openPositionLogModal = async function (marketId) {
+        const modal = document.getElementById('position-log-modal');
+        const tbody = document.getElementById('pos-log-body');
+        if (!modal || !tbody) return;
+
+        tbody.innerHTML = '<tr><td colspan="12" class="empty-state">Loading activity logs...</td></tr>';
+        modal.classList.remove('hidden');
+
+        try {
+            const res = await apiFetch(`/api/portfolio/${marketId}/logs`);
+            if (!res.ok) {
+                tbody.innerHTML = '<tr><td colspan="12" class="empty-state text-red">Failed to load logs.</td></tr>';
+                return;
+            }
+            const data = await safeJson(res);
+
+            const elStatus = document.getElementById('pos-log-status');
+            const elShares = document.getElementById('pos-log-shares');
+            const elPnl = document.getElementById('pos-log-pnl');
+            const elAuto = document.getElementById('pos-log-autotrade');
+            const elTitle = document.getElementById('pos-log-title');
+
+            if (elTitle) elTitle.textContent = `Activity Log: ${data.question}`;
+            if (elStatus) elStatus.textContent = data.status || '--';
+            if (elShares) elShares.textContent = (data.shares || 0).toFixed(4);
+            if (elPnl) {
+                const pnl = data.unrealized_pnl || 0;
+                const roi = data.roi || 0;
+                elPnl.textContent = `${pnl >= 0 ? '+' : ''}${formatUsd(pnl)} (${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%)`;
+                elPnl.className = `modal-kpi-value text-${pnl >= 0 ? 'green' : 'red'}`;
+            }
+            if (elAuto) {
+                elAuto.textContent = data.auto_trading_enabled ? 'Enabled' : 'Disabled';
+                elAuto.style.color = data.auto_trading_enabled ? 'var(--green)' : 'var(--text-muted)';
+            }
+
+            const logs = data.logs || [];
+            if (!logs.length) {
+                tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No events recorded.</td></tr>';
+            } else {
+                tbody.innerHTML = logs.map(l => {
+                    const d = l.details || {};
+                    const amt = d.amount !== undefined && d.amount !== null ? formatUsd(d.amount) : '--';
+                    const sh = d.shares !== undefined && d.shares !== null ? Number(d.shares).toFixed(4) : '--';
+                    const entry = d.entry_price !== undefined && d.entry_price !== null ? `$${Number(d.entry_price).toFixed(4)}` : '--';
+                    const exitCurrentValue = d.exit_price ?? d.current_price ?? d.price;
+                    const exitCurrent = exitCurrentValue !== undefined && exitCurrentValue !== null ? `$${Number(exitCurrentValue).toFixed(4)}` : '--';
+
+                    let pnlText = '--';
+                    const pnlVal = d.pnl ?? d.profit_loss;
+                    if (pnlVal !== undefined && pnlVal !== null) {
+                        const pnlNum = Number(pnlVal);
+                        const roiNum = Number(d.roi ?? 0);
+                        const pnlSign = pnlNum >= 0 ? '+' : '';
+                        pnlText = `${pnlSign}${formatUsd(pnlNum)} (${roiNum >= 0 ? '+' : ''}${roiNum.toFixed(2)}%)`;
+                    }
+
+                    const confText = d.confidence !== undefined && d.confidence !== null ? `${d.confidence}%` : '--';
+                    const edgeText = d.edge !== undefined && d.edge !== null ? `${(Number(d.edge) * 100).toFixed(2)}%` : '--';
+                    const riskText = d.risk_status || d.risk || '--';
+
+                    return `
+            <tr>
+              <td style="white-space:nowrap; font-size:11px;">${formatTime(l.timestamp)}</td>
+              <td><span class="badge badge-secondary">${escapeHtml(l.action)}</span></td>
+              <td><span class="badge badge-ghost">${escapeHtml(l.source || 'BOT')}</span></td>
+              <td style="text-align:right; font-family:var(--font-mono);">${amt}</td>
+              <td style="text-align:right; font-family:var(--font-mono);">${sh}</td>
+              <td style="text-align:right; font-family:var(--font-mono);">${entry}</td>
+              <td style="text-align:right; font-family:var(--font-mono);">${exitCurrent}</td>
+              <td style="text-align:right; font-family:var(--font-mono);">${pnlText}</td>
+              <td>${confText}</td>
+              <td>${edgeText}</td>
+              <td><span class="badge badge-ghost">${escapeHtml(riskText)}</span></td>
+              <td style="font-size:11px; max-width:260px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(d.reason || '')}">${escapeHtml(d.reason || '')}</td>
+            </tr>
+          `;
+                }).join('');
+            }
+        } catch (e) {
+            console.error('Error opening position logs:', e);
+            tbody.innerHTML = '<tr><td colspan="12" class="empty-state text-red">Error loading logs.</td></tr>';
+        }
+    }
+
+    document.getElementById('close-pos-log-modal')?.addEventListener('click', () => {
+        document.getElementById('position-log-modal')?.classList.add('hidden');
+    });
+
+    document.getElementById('portfolio-query-filter')?.addEventListener('input', () => {
+        // Debounce filtering slightly or apply on 'Enter' (here we do apply filter explicitly for UX)
+    });
+
+    document.getElementById('system-logs-btn')?.addEventListener('click', () => {
+        ensureOperationLogPanel();
+        const panel = document.getElementById('operation-log-panel');
+        if (panel) {
+            panel.classList.remove('collapsed');
+        }
+    });
+
+    document.getElementById('refresh-positions-btn')?.addEventListener('click', fetchPositions);
 
     function openInvoiceModal(trade) {
         const invoiceModal = document.getElementById('invoice-modal');
@@ -1541,18 +2929,41 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!data.history || !data.history.length) {
                     tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No trade history.</td></tr>';
                 } else {
-                    tbody.innerHTML = data.history.map((t, i) => `
+                    tbody.innerHTML = data.history.map((t, i) => {
+                        const displaySide = t.side === 'YES' || t.side === 'NO' ? `BUY ${t.side}` : t.side.replace('CLOSE', 'SELL');
+                        const rationale = t.reasoning || t.summary || 'No rationale recorded.';
+                        const aiProb = t.ai_probability !== undefined ? t.ai_probability : '--';
+                        const edge = t.edge !== undefined ? t.edge : '--';
+                        return `
             <tr>
               <td>${formatTime(t.timestamp)}</td>
               <td class="truncate" style="max-width:250px;" title="${escapeHtml(t.question)}">${escapeHtml(t.question)}</td>
-              <td><span class="badge badge-${t.side.includes('YES') ? 'green' : 'red'}">${escapeHtml(t.side)}</span></td>
+              <td><span class="badge badge-${t.side.includes('YES') ? 'green' : 'red'}">${escapeHtml(displaySide)}</span></td>
               <td style="text-align:right;">${formatUsd(t.amount)}</td>
               <td style="text-align:right;">$${t.price.toFixed(3)}</td>
-              <td>${t.confidence}%</td>
+              <td>${t.confidence || '--'}%</td>
               <td>${escapeHtml(t.status)}</td>
-              <td style="text-align:center;"><button class="btn btn-ghost btn-sm view-invoice-btn" data-idx="${i}">View</button></td>
+              <td style="text-align:center;">
+                <button class="btn btn-ghost btn-sm view-invoice-btn" data-idx="${i}">Invoice</button>
+                <button class="btn btn-secondary btn-sm toggle-audit-btn" onclick="this.closest('tr').nextElementSibling.classList.toggle('hidden')">Audit</button>
+              </td>
             </tr>
-          `).join('');
+            <tr class="hidden">
+              <td colspan="8" style="padding:16px; background:var(--bg-input); border-bottom:1px solid var(--border);">
+                <div style="font-size:12px; line-height:1.6; color:var(--text-secondary);">
+                  <strong style="color:var(--text-primary);">Gemini Analysis Summary:</strong><br/>
+                  ${escapeHtml(rationale)}<br/><br/>
+                  <div style="display:flex; gap:16px;">
+                    <div><strong>AI Probability:</strong> ${aiProb}%</div>
+                    <div><strong>Edge:</strong> ${edge}%</div>
+                  </div>
+                  <div style="margin-top:8px; font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">
+                    <strong>Workflow:</strong> Scanned Market &rarr; Analysed via AI Model &rarr; Evaluated Edge & Confidence &rarr; Executed via CLOB API
+                  </div>
+                </div>
+              </td>
+            </tr>
+          `}).join('');
 
                     tbody.querySelectorAll('.view-invoice-btn').forEach(btn => {
                         btn.addEventListener('click', () => {
@@ -1587,12 +2998,44 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const modals = [
+                'terms-modal',
+                'analysis-modal',
+                'market-detail-modal',
+                'invoice-modal',
+                'position-log-modal',
+                'sector-modal',
+                'sell-position-modal'
+            ];
+            modals.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.add('hidden');
+            });
+            if (typeof closeConfirm === 'function') closeConfirm(false);
+            if (typeof closeSectorModal === 'function') closeSectorModal();
+            if (typeof closeSellModal === 'function') closeSellModal();
+        }
+    });
+
     // ── Initialization ─────────────────────────────────────────────
     function initApp() {
+        const token = sessionStorage.getItem('polybot-token');
+        if (token && token.includes(':')) {
+            const username = token.split(':')[0];
+            const userDisplay = document.getElementById('sidebar-username-display');
+            if (userDisplay) {
+                userDisplay.textContent = `User: ${username}`;
+            }
+        }
+
         fetchDashboardData();
         loadSectors();
         fetchConfig();
         fetchStatus();
+        fetchOperationLogs();
+        initPortfolioDashboardListeners();
 
         if (typeof updateTicker === 'function') {
             updateTicker();
@@ -1600,7 +3043,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    if (sessionStorage.getItem('polybot-token') || localStorage.getItem('polybot-terms-accepted')) {
+    if (sessionStorage.getItem('polybot-token')) {
         showApp();
     } else {
         showLogin();
