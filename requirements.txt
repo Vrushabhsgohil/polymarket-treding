@@ -30,3 +30,4 @@ aiofiles==24.1.0
 prometheus-client==0.21.0
 sentry-sdk==2.18.0
 parallel-web
+pyjwt
